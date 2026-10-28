@@ -1,6 +1,6 @@
 # Hide generated bundle from GitHub's PR diff view by default and
 # signal "don't review this" — actual source lives in src/. The bundle
-# is rebuilt automatically by .github/workflows/rebuild-dist.yml.
+# is rebuilt with yarn package and verified by .github/workflows/ci.yml.
 dist/index.js     linguist-generated=true binary
 dist/index.js.map linguist-generated=true binary
 dist/licenses.txt linguist-generated=true

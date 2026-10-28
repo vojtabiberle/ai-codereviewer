@@ -140,3 +140,15 @@ agentic_max_turns: 2.5
     expect(cfg.agentic_max_turns).toBeUndefined();
   });
 });
+
+
+it.each(['approve_confidence_threshold: -1', 'approve_confidence_threshold: 101', 'max_comments: 1.5',
+  'agentic_max_total_bytes: -1', 'agentic_max_total_bytes: 1.5'])('ignores invalid policy numeric input: %s', async yaml => {
+  expect(await loadRepoConfig(fakeGithub(yaml), 'config.yml', 'BASE')).toEqual({});
+});
+
+it('loads aggregate read limits from the supplied trusted ref', async () => {
+  const github = fakeGithub('agentic_max_total_bytes: 12345');
+  expect(await loadRepoConfig(github, 'config.yml', 'BASE')).toEqual({ agentic_max_total_bytes: 12345 });
+  expect(github.getFileContent).toHaveBeenCalledWith('config.yml', 'BASE', { quiet: true });
+});

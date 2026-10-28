@@ -38,9 +38,7 @@ export class DiffService {
     lastReviewedCommit?: string | null
   ): Promise<RelevantFile[]> {
     const baseUrl = `https://api.github.com/repos/${prDetails.owner}/${prDetails.repo}`;
-    const diffUrl = lastReviewedCommit ? 
-      `${baseUrl}/compare/${lastReviewedCommit}...${prDetails.head}` :
-      `${baseUrl}/pulls/${prDetails.number}`;
+    const diffUrl = `${baseUrl}/compare/${lastReviewedCommit || prDetails.base}...${prDetails.head}`;
 
     const response = await fetch(diffUrl, {
       headers: {

@@ -4,7 +4,7 @@ import { GitHubService } from './GitHubService';
 import { CommentSeverity } from '../providers/AIProvider';
 
 /**
- * Per-repo overrides loaded from .github/ai-review.yml (or whatever
+ * Trusted base-commit configuration loaded from .github/ai-review.yml (or whatever
  * CONFIG_FILE is set to). Each field is optional; when present, it
  * overrides the matching action input. Sensitive / org-level inputs
  * (API keys, base URLs, instructions URL & token) are intentionally
@@ -25,6 +25,7 @@ export interface RepoConfig {
   agentic_max_files?: number;
   agentic_max_bytes_per_file?: number;
   agentic_max_turns?: number;
+  agentic_max_total_bytes?: number;
 }
 
 const VALID_SEVERITIES = new Set<CommentSeverity>(['blocker', 'major', 'minor', 'nit']);
@@ -32,11 +33,11 @@ const VALID_SEVERITIES = new Set<CommentSeverity>(['blocker', 'major', 'minor', 
 export async function loadRepoConfig(
   github: GitHubService,
   path: string | undefined,
-  headRef: string
+  baseRef: string
 ): Promise<RepoConfig> {
   if (!path?.trim()) return {};
 
-  const content = await github.getFileContent(path, headRef, { quiet: true });
+  const content = await github.getFileContent(path, baseRef, { quiet: true });
   if (!content || !content.trim()) return {};
 
   let parsed: unknown;
@@ -66,10 +67,10 @@ export async function loadRepoConfig(
   if (typeof raw.approve_reviews === 'boolean') {
     cfg.approve_reviews = raw.approve_reviews;
   }
-  if (typeof raw.approve_confidence_threshold === 'number' && Number.isFinite(raw.approve_confidence_threshold)) {
+  if (typeof raw.approve_confidence_threshold === 'number' && Number.isFinite(raw.approve_confidence_threshold) && raw.approve_confidence_threshold >= 0 && raw.approve_confidence_threshold <= 100) {
     cfg.approve_confidence_threshold = raw.approve_confidence_threshold;
   }
-  if (typeof raw.max_comments === 'number' && Number.isFinite(raw.max_comments) && raw.max_comments >= 0) {
+  if (typeof raw.max_comments === 'number' && Number.isSafeInteger(raw.max_comments) && raw.max_comments >= 0) {
     cfg.max_comments = raw.max_comments;
   }
   if (typeof raw.exclude_patterns === 'string') {
@@ -100,20 +101,24 @@ export async function loadRepoConfig(
   if (typeof raw.agentic_review === 'boolean') {
     cfg.agentic_review = raw.agentic_review;
   }
-  if (typeof raw.agentic_max_files === 'number' && Number.isInteger(raw.agentic_max_files) && raw.agentic_max_files > 0) {
+  if (typeof raw.agentic_max_files === 'number' && Number.isSafeInteger(raw.agentic_max_files) && raw.agentic_max_files > 0) {
     cfg.agentic_max_files = raw.agentic_max_files;
   } else if (raw.agentic_max_files !== undefined) {
     core.warning(`${path}: ignoring agentic_max_files='${raw.agentic_max_files}' (must be a positive integer)`);
   }
-  if (typeof raw.agentic_max_bytes_per_file === 'number' && Number.isInteger(raw.agentic_max_bytes_per_file) && raw.agentic_max_bytes_per_file > 0) {
+  if (typeof raw.agentic_max_bytes_per_file === 'number' && Number.isSafeInteger(raw.agentic_max_bytes_per_file) && raw.agentic_max_bytes_per_file > 0) {
     cfg.agentic_max_bytes_per_file = raw.agentic_max_bytes_per_file;
   } else if (raw.agentic_max_bytes_per_file !== undefined) {
     core.warning(`${path}: ignoring agentic_max_bytes_per_file='${raw.agentic_max_bytes_per_file}' (must be a positive integer)`);
   }
-  if (typeof raw.agentic_max_turns === 'number' && Number.isInteger(raw.agentic_max_turns) && raw.agentic_max_turns > 0) {
+  if (typeof raw.agentic_max_turns === 'number' && Number.isSafeInteger(raw.agentic_max_turns) && raw.agentic_max_turns > 0) {
     cfg.agentic_max_turns = raw.agentic_max_turns;
   } else if (raw.agentic_max_turns !== undefined) {
     core.warning(`${path}: ignoring agentic_max_turns='${raw.agentic_max_turns}' (must be a positive integer)`);
+  }
+
+  if (typeof raw.agentic_max_total_bytes === 'number' && Number.isSafeInteger(raw.agentic_max_total_bytes) && raw.agentic_max_total_bytes > 0) {
+    cfg.agentic_max_total_bytes = raw.agentic_max_total_bytes;
   }
 
   const overrides = Object.keys(cfg);

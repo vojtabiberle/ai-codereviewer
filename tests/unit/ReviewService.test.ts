@@ -486,10 +486,10 @@ max_comments: 5
 
     const ctx = (aiProvider as StubAIProvider).lastRequest.context;
     expect(ctx.agenticReview).toBe(true);
-    expect(ctx.agenticLimits).toEqual({ maxFiles: 5, maxBytesPerFile: 1000, maxTurns: 3 });
+    expect(ctx.agenticLimits).toEqual({ maxFiles: 5, maxBytesPerFile: 1000, maxTurns: 3, maxTotalBytes: 200000 });
   });
 
-  it('CONFIG_FILE agentic_max_* keys override action-input agentic limits', async () => {
+  it('CONFIG_FILE agentic_max_* keys lower action-input agentic limits', async () => {
     const { githubService, diffService, aiProvider } = makeServices({
       summary: 'sum', suggestedAction: 'COMMENT', confidence: 50, lineComments: []
     });
@@ -510,13 +510,14 @@ agentic_max_turns: 4
       approveReviews: true,
       minCommentSeverity: 'minor',
       configFile: '.github/ai-review.yml',
+      agenticReview: true,
       agenticLimits: { maxFiles: 99, maxBytesPerFile: 999999, maxTurns: 99 },
     });
 
     await service.performReview(1);
 
     const ctx = (aiProvider as StubAIProvider).lastRequest.context;
-    expect(ctx.agenticLimits).toEqual({ maxFiles: 7, maxBytesPerFile: 4096, maxTurns: 4 });
+    expect(ctx.agenticLimits).toEqual({ maxFiles: 7, maxBytesPerFile: 4096, maxTurns: 4, maxTotalBytes: 200000 });
   });
 
   it('keeps higher-severity comments when MAX_COMMENTS truncates', async () => {
@@ -543,5 +544,73 @@ agentic_max_turns: 4
     const submitted = submit.mock.calls[0][1].lineComments;
     expect(submitted).toHaveLength(1);
     expect(submitted[0].severity).toBe('major');
+  });
+});
+
+
+describe('ReviewService trust and input boundaries', () => {
+  const response: ReviewResponse = { summary: 'ok', suggestedAction: 'APPROVE', confidence: 99, lineComments: [] };
+
+  it('reads policy from base, source context from head and submits the reviewed SHA', async () => {
+    const { githubService, diffService, aiProvider } = makeServices({ ...response });
+    (githubService.getFileContent as jest.Mock).mockImplementation(async (path: string) => path === '.github/ai-review.yml' ? '' : 'content');
+    const service = new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0, approveReviews: false, configFile: '.github/ai-review.yml',
+      instructionsFile: '.github/ai-review.md', projectContextFile: 'PROJECT.md', contextFiles: ['package.json'],
+    });
+    await service.performReview(1);
+    expect(githubService.getFileContent).toHaveBeenCalledWith('.github/ai-review.yml', 'B', { quiet: true });
+    expect(githubService.getFileContent).toHaveBeenCalledWith('.github/ai-review.md', 'B', { quiet: true });
+    expect(githubService.getFileContent).toHaveBeenCalledWith('PROJECT.md', 'B', { quiet: true });
+    expect(githubService.getFileContent).toHaveBeenCalledWith('package.json', 'H');
+    expect(githubService.getFileContent).toHaveBeenCalledWith('src/a.ts', 'H');
+    expect((githubService.submitReview as jest.Mock).mock.calls[0][3]).toBe('H');
+  });
+
+  it('cannot enable approvals or agentic mode through repository YAML', async () => {
+    const { githubService, diffService, aiProvider } = makeServices({ ...response });
+    (githubService.getFileContent as jest.Mock).mockImplementation(async (path: string) =>
+      path === '.github/ai-review.yml' ? 'approve_reviews: true\nagentic_review: true\napprove_confidence_threshold: 0' : 'content');
+    await new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0, approveReviews: false, agenticReview: false, configFile: '.github/ai-review.yml',
+    }).performReview(1);
+    expect(aiProvider.lastRequest.context.agenticReview).toBe(false);
+    expect((githubService.submitReview as jest.Mock).mock.calls[0][1].suggestedAction).toBe('COMMENT');
+  });
+
+  it('cannot lower approval thresholds or raise agentic budgets through YAML', async () => {
+    const { githubService, diffService, aiProvider } = makeServices({ ...response, confidence: 90 });
+    (githubService.getFileContent as jest.Mock).mockImplementation(async (path: string) =>
+      path === '.github/ai-review.yml' ? 'approve_confidence_threshold: 0\nagentic_max_files: 999\nagentic_max_bytes_per_file: 999999\nagentic_max_turns: 999\nagentic_max_total_bytes: 999999' : 'content');
+    const limits = { maxFiles: 2, maxBytesPerFile: 100, maxTurns: 3, maxTotalBytes: 150 };
+    await new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0, approveReviews: true, approveConfidenceThreshold: 95, agenticReview: true,
+      agenticLimits: limits, configFile: '.github/ai-review.yml',
+    }).performReview(1);
+    expect(aiProvider.lastRequest.context.agenticLimits).toEqual(limits);
+    expect((githubService.submitReview as jest.Mock).mock.calls[0][1].suggestedAction).toBe('COMMENT');
+  });
+
+  it('rejects oversized UTF-8 input before calling a provider or submitting a review', async () => {
+    const { githubService, diffService, aiProvider } = makeServices({ ...response });
+    (githubService.getFileContent as jest.Mock).mockResolvedValue('ž'.repeat(5000));
+    const review = jest.spyOn(aiProvider, 'review');
+    const service = new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0, approveReviews: false, maxInputBytes: 8000,
+    });
+    await expect(service.performReview(1)).rejects.toThrow('MAX_INPUT_BYTES');
+    expect(review).not.toHaveBeenCalled();
+    expect(githubService.submitReview).not.toHaveBeenCalled();
+  });
+
+  it('does not restart an agentic session after a transient provider error', async () => {
+    const { githubService, diffService, aiProvider } = makeServices({ ...response });
+    const review = jest.spyOn(aiProvider, 'review').mockRejectedValue(Object.assign(new Error('rate limited'), { status: 429 }));
+    const service = new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0, approveReviews: false, agenticReview: true,
+    });
+    await expect(service.performReview(1)).rejects.toThrow('rate limited');
+    expect(review).toHaveBeenCalledTimes(1);
+    expect(githubService.submitReview).not.toHaveBeenCalled();
   });
 });

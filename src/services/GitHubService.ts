@@ -1,7 +1,6 @@
 import { Octokit } from '@octokit/rest';
 import * as core from '@actions/core';
 import { ReviewResponse } from '../providers/AIProvider';
-import { withRetry } from '../utils/retry';
 
 export interface PRDetails {
   owner: string;
@@ -96,8 +95,15 @@ export class GitHubService {
   async submitReview(
     prNumber: number,
     review: ReviewResponse,
-    validRightLinesByPath?: Map<string, Set<number>>
+    validRightLinesByPath: Map<string, Set<number>> | undefined,
+    commitId: string
   ) {
+    const assertCurrentHead = async () => {
+      if (!commitId || (await this.getPRDetails(prNumber)).head !== commitId) {
+        throw new Error('PR head changed during review; refusing to publish a stale review. Re-run on the new commit.');
+      }
+    };
+    await assertCurrentHead();
     const { summary, lineComments = [], suggestedAction } = review;
 
     const { kept, dropped } = this.partitionComments(lineComments, validRightLinesByPath);
@@ -120,33 +126,31 @@ export class GitHubService {
 
     const event = suggestedAction.toUpperCase() as 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 
+    const params = {
+      owner: this.owner,
+      repo: this.repo,
+      pull_number: prNumber,
+      commit_id: commitId,
+      body: summary,
+      comments,
+      event,
+    };
     try {
-      await withRetry(
-        () => this.octokit.pulls.createReview({
-          owner: this.owner,
-          repo: this.repo,
-          pull_number: prNumber,
-          body: summary,
-          comments,
-          event,
-        }),
-        { label: 'pulls.createReview' }
-      );
+      // Do not retry ambiguous network failures: GitHub may already have created the review.
+      await this.octokit.pulls.createReview(params);
     } catch (error) {
-      core.warning(`Failed to submit review with comments: ${error}`);
-      core.info('Retrying without line comments...');
-
-      await withRetry(
-        () => this.octokit.pulls.createReview({
-          owner: this.owner,
-          repo: this.repo,
-          pull_number: prNumber,
-          body: `${summary}\n\n> Note: Some line comments were omitted due to technical limitations.`,
-          comments: [],
-          event,
-        }),
-        { label: 'pulls.createReview (no comments)' }
-      );
+      const e = error as { status?: number; response?: { data?: { errors?: Array<{ field?: string }> } } };
+      const errors = e.response?.data?.errors;
+      const invalidLine = e.status === 422 && comments.length > 0 && Array.isArray(errors) &&
+        errors.some(item => ['line', 'position', 'path'].includes(item?.field ?? ''));
+      if (!invalidLine) throw error;
+      await assertCurrentHead();
+      core.warning('GitHub rejected comment locations; submitting the summary on the reviewed commit.');
+      await this.octokit.pulls.createReview({
+        ...params,
+        body: `${summary}\n\n> Note: Line comments were omitted because GitHub rejected their locations.`,
+        comments: [],
+      });
     }
   }
 

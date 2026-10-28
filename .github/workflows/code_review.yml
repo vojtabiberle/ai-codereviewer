@@ -1,84 +1,38 @@
 name: AI Code Review
 
-# Triggers:
-#   - Auto: every PR (and ready_for_review for drafts that get promoted)
-#   - On-demand re-trigger: apply the "ai-review" label to any PR
-#
-# Configure via GitHub Actions repository variables (Settings → Secrets and variables → Actions → Variables):
-#   AI_REVIEW_MODE          "auto" (default) — run automatically on every PR
-#                           "label"          — only run when the "ai-review" label is applied
-#   AI_REVIEW_INCLUDE_DRAFTS "false" (default) — skip drafts in auto mode
-#                           "true"            — also review drafts in auto mode
-#
-# Regardless of mode, applying the "ai-review" label always triggers a (re-)review.
-
 on:
   pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-      - labeled
+    types: [opened, synchronize, reopened, ready_for_review]
 
-permissions: write-all
+permissions:
+  contents: read
+  pull-requests: write
 
 concurrency:
   group: code-review-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  code_review:
-    runs-on: ubuntu-latest
+  review:
+    # Opt in using repository variables and your own API secret.
     if: >-
-      (github.event.action == 'labeled' && github.event.label.name == 'ai-review')
-      || (
-        github.event.action != 'labeled'
-        && (vars.AI_REVIEW_MODE == 'auto' || vars.AI_REVIEW_MODE == '')
-        && (
-          github.event.pull_request.draft == false
-          || vars.AI_REVIEW_INCLUDE_DRAFTS == 'true'
-        )
-      )
+      vars.AI_REVIEW_ENABLED == 'true'
+      && !github.event.pull_request.draft
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          node-version: 24
-
-      - name: Install Dependencies
-        run: yarn install --frozen-lockfile
-
-      - name: Build Action
-        run: yarn build
-
-      - name: AI Code Reviewer
-        uses: ./.
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: ./
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AI_PROVIDER: "google"
-          AI_API_KEY: ${{ secrets.GOOGLE_AI_KEY }}
-          AI_MODEL: "gemini-3.1-pro-preview"
-          AI_TEMPERATURE: 0.3
-          MAX_COMMENTS: 5
-          APPROVE_REVIEWS: true
-          EXCLUDE_PATTERNS: "yarn.lock,dist/**"
-
-      - name: Remove ai-review label after re-trigger
-        if: always() && github.event.action == 'labeled' && github.event.label.name == 'ai-review'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                name: 'ai-review',
-              });
-            } catch (e) {
-              core.warning(`Could not remove label: ${e.message}`);
-            }
+          AI_PROVIDER: ${{ vars.AI_REVIEW_PROVIDER }}
+          AI_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
+          APPROVE_REVIEWS: 'false'
+          AGENTIC_REVIEW: 'false'
+          MAX_COMMENTS: '5'
+          EXCLUDE_PATTERNS: '**/*.lock,dist/**'

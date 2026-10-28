@@ -44,6 +44,7 @@ export interface ReviewRequest {
       maxFiles: number;
       maxBytesPerFile: number;
       maxTurns: number;
+      maxTotalBytes: number;
     };
   };
   /**

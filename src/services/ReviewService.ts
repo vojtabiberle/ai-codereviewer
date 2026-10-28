@@ -1,4 +1,5 @@
-import { AIProvider } from '../providers/AIProvider';
+import { buildSystemPrompt, buildUserPayload } from '../prompts';
+import { AIProvider, ReviewRequest } from '../providers/AIProvider';
 import { GitHubService } from '../services/GitHubService';
 import { DiffService } from '../services/DiffService';
 import { CommentSeverity, ReviewResponse, UsageReport } from '../providers/AIProvider';
@@ -16,6 +17,7 @@ function severityRank(s: CommentSeverity | undefined): number {
 }
 
 export interface ReviewServiceConfig {
+  maxInputBytes?: number;
   maxComments: number;
   approveReviews: boolean;
   approveConfidenceThreshold?: number;
@@ -34,7 +36,7 @@ export interface ReviewServiceConfig {
 }
 
 export class ReviewService {
-  private config: ReviewServiceConfig;
+  private config: ReviewServiceConfig & { maxInputBytes: number; agenticLimits: AgenticLimits };
 
   constructor(
     private aiProvider: AIProvider,
@@ -48,6 +50,7 @@ export class ReviewService {
       : 80;
 
     this.config = {
+      maxInputBytes: config.maxInputBytes ?? 1_000_000,
       maxComments: config.maxComments || 0,
       approveReviews: config.approveReviews,
       approveConfidenceThreshold: threshold,
@@ -68,20 +71,21 @@ export class ReviewService {
 
   private applyRepoConfig(repo: RepoConfig): void {
     if (repo.min_comment_severity !== undefined) this.config.minCommentSeverity = repo.min_comment_severity;
-    if (repo.approve_reviews !== undefined) this.config.approveReviews = repo.approve_reviews;
-    if (repo.approve_confidence_threshold !== undefined) this.config.approveConfidenceThreshold = repo.approve_confidence_threshold;
+    if (repo.approve_reviews !== undefined) this.config.approveReviews = this.config.approveReviews && repo.approve_reviews;
+    if (repo.approve_confidence_threshold !== undefined) this.config.approveConfidenceThreshold = Math.max(this.config.approveConfidenceThreshold ?? 80, repo.approve_confidence_threshold);
     if (repo.max_comments !== undefined) this.config.maxComments = repo.max_comments;
     if (repo.instructions_file !== undefined) this.config.instructionsFile = repo.instructions_file;
     if (repo.project_context_file !== undefined) this.config.projectContextFile = repo.project_context_file;
     if (repo.project_context !== undefined) this.config.projectContext = repo.project_context;
     if (repo.context_files !== undefined) this.config.contextFiles = repo.context_files;
-    if (repo.agentic_review !== undefined) this.config.agenticReview = repo.agentic_review;
-    if (repo.agentic_max_files !== undefined || repo.agentic_max_bytes_per_file !== undefined || repo.agentic_max_turns !== undefined) {
+    if (repo.agentic_review !== undefined) this.config.agenticReview = this.config.agenticReview && repo.agentic_review;
+    if (repo.agentic_max_files !== undefined || repo.agentic_max_bytes_per_file !== undefined || repo.agentic_max_turns !== undefined || repo.agentic_max_total_bytes !== undefined) {
       this.config.agenticLimits = {
-        ...(this.config.agenticLimits ?? DEFAULT_AGENTIC_LIMITS),
-        ...(repo.agentic_max_files !== undefined ? { maxFiles: repo.agentic_max_files } : {}),
-        ...(repo.agentic_max_bytes_per_file !== undefined ? { maxBytesPerFile: repo.agentic_max_bytes_per_file } : {}),
-        ...(repo.agentic_max_turns !== undefined ? { maxTurns: repo.agentic_max_turns } : {}),
+        ...this.config.agenticLimits,
+        ...(repo.agentic_max_total_bytes !== undefined ? { maxTotalBytes: Math.min(this.config.agenticLimits.maxTotalBytes, repo.agentic_max_total_bytes) } : {}),
+        ...(repo.agentic_max_files !== undefined ? { maxFiles: Math.min(this.config.agenticLimits.maxFiles, repo.agentic_max_files) } : {}),
+        ...(repo.agentic_max_bytes_per_file !== undefined ? { maxBytesPerFile: Math.min(this.config.agenticLimits.maxBytesPerFile, repo.agentic_max_bytes_per_file) } : {}),
+        ...(repo.agentic_max_turns !== undefined ? { maxTurns: Math.min(this.config.agenticLimits.maxTurns, repo.agentic_max_turns) } : {}),
       };
     }
   }
@@ -96,7 +100,7 @@ export class ReviewService {
     // Layer per-repo config (.github/ai-review.yml) on top of action inputs
     // BEFORE we use any tunable to fetch / filter / decide. exclude_patterns
     // is applied to DiffService below; the rest mutate this.config.
-    const repoConfig = await loadRepoConfig(this.githubService, this.config.configFile, prDetails.head);
+    const repoConfig = await loadRepoConfig(this.githubService, this.config.configFile, prDetails.base);
     this.applyRepoConfig(repoConfig);
     if (repoConfig.exclude_patterns !== undefined) {
       this.diffService.setExcludePatterns(repoConfig.exclude_patterns);
@@ -131,11 +135,11 @@ export class ReviewService {
     );
 
     // Get repository context (now using configured files)
-    const contextFiles = await this.getRepositoryContext();
-    const repoInstructions = await this.getRepoInstructions(prDetails.head);
+    const contextFiles = await this.getRepositoryContext(prDetails.head);
+    const repoInstructions = await this.getRepoInstructions(prDetails.base);
 
-    // Perform AI review with retry on transient errors
-    const projectContext = await this.getProjectContext(prDetails.head);
+    // Policy comes from the trusted base; reviewed source comes from the pinned head.
+    const projectContext = await this.getProjectContext(prDetails.base);
 
     const agenticReview = !!this.config.agenticReview;
     const agenticEnv = agenticReview
@@ -151,34 +155,39 @@ export class ReviewService {
       core.info(`Agentic review enabled — model can call read_file (max ${agenticEnv!.limits.maxFiles} files / ${agenticEnv!.limits.maxBytesPerFile} bytes each / ${agenticEnv!.limits.maxTurns} turns)`);
     }
 
-    const review = await withRetry(
-      () => this.aiProvider.review({
-        files: filesWithContent,
-        contextFiles,
-        previousReviews,
-        pullRequest: {
-          title: prDetails.title,
-          description: prDetails.description,
-          base: prDetails.base,
-          head: prDetails.head,
-        },
-        context: {
-          repository: process.env.GITHUB_REPOSITORY ?? '',
-          owner: process.env.GITHUB_REPOSITORY_OWNER ?? '',
-          projectContext,
-          repoInstructions,
-          isUpdate,
-          agenticReview,
-          agenticLimits: agenticEnv?.limits,
-        },
-        tools: agenticEnv
-          ? {
-              readFile: (path, reason, args) => executeReadFile(agenticEnv, path, reason, args),
-            }
-          : undefined,
-      }),
-      { label: 'aiProvider.review' }
-    );
+    const request: ReviewRequest = {
+      files: filesWithContent,
+      contextFiles,
+      previousReviews,
+      pullRequest: {
+        title: prDetails.title,
+        description: prDetails.description,
+        base: prDetails.base,
+        head: prDetails.head,
+      },
+      context: {
+        repository: process.env.GITHUB_REPOSITORY ?? '',
+        owner: process.env.GITHUB_REPOSITORY_OWNER ?? '',
+        projectContext,
+        repoInstructions,
+        isUpdate,
+        agenticReview,
+        agenticLimits: agenticEnv?.limits,
+      },
+      tools: agenticEnv
+        ? {
+            readFile: (path, reason, args) => executeReadFile(agenticEnv, path, reason, args),
+          }
+        : undefined,
+    };
+    const inputBytes = Buffer.byteLength(buildSystemPrompt(request) + buildUserPayload(request), 'utf8');
+    if (inputBytes > this.config.maxInputBytes) {
+      throw new Error(`Review input is ${inputBytes} bytes; MAX_INPUT_BYTES is ${this.config.maxInputBytes}. Narrow the diff or context; no review was submitted.`);
+    }
+    // Retrying an entire agentic session would restart its turn budget.
+    const review = agenticReview
+      ? await this.aiProvider.review(request)
+      : await withRetry(() => this.aiProvider.review(request), { label: 'aiProvider.review' });
 
     // Annotate usage with the files actually read so the step summary picks it up
     if (agenticEnv) {
@@ -226,7 +235,8 @@ export class ReviewService {
           confidence: review.confidence,
         }),
       },
-      validLinesByPath
+      validLinesByPath,
+      prDetails.head
     );
 
     return review;
@@ -355,9 +365,9 @@ export class ReviewService {
     }
   }
 
-  private async getRepoInstructions(headRef: string): Promise<string | undefined> {
+  private async getRepoInstructions(baseRef: string): Promise<string | undefined> {
     const shared = await this.fetchInstructionsUrl();
-    const local = await this.fetchInstructionsFile(headRef);
+    const local = await this.fetchInstructionsFile(baseRef);
 
     if (shared && local) {
       return `${shared.trim()}\n\n---\n\n${local.trim()}`;
@@ -365,11 +375,11 @@ export class ReviewService {
     return shared || local;
   }
 
-  private async fetchInstructionsFile(headRef: string): Promise<string | undefined> {
+  private async fetchInstructionsFile(baseRef: string): Promise<string | undefined> {
     const path = this.config.instructionsFile?.trim();
     if (!path) return undefined;
 
-    const content = await this.githubService.getFileContent(path, headRef, { quiet: true });
+    const content = await this.githubService.getFileContent(path, baseRef, { quiet: true });
     if (content && content.trim().length > 0) {
       core.info(`Loaded repo-specific reviewer instructions from ${path}`);
       return content;
@@ -407,10 +417,10 @@ export class ReviewService {
     return undefined;
   }
 
-  private async getProjectContext(headRef: string): Promise<string | undefined> {
+  private async getProjectContext(baseRef: string): Promise<string | undefined> {
     const path = this.config.projectContextFile?.trim();
     if (path) {
-      const content = await this.githubService.getFileContent(path, headRef, { quiet: true });
+      const content = await this.githubService.getFileContent(path, baseRef, { quiet: true });
       if (content && content.trim().length > 0) {
         core.info(`Loaded project context from ${path}`);
         return content;
@@ -420,12 +430,12 @@ export class ReviewService {
     return inline ? inline : undefined;
   }
 
-  private async getRepositoryContext(): Promise<Array<{path: string, content: string}>> {
+  private async getRepositoryContext(headRef: string): Promise<Array<{path: string, content: string}>> {
     const results = [];
 
     for (const file of (this.config.contextFiles || [])) {
       try {
-        const content = await this.githubService.getFileContent(file);
+        const content = await this.githubService.getFileContent(file, headRef);
         if (content) {
           results.push({ path: file, content });
         }

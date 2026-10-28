@@ -6,12 +6,14 @@ export interface AgenticLimits {
   maxFiles: number;
   maxBytesPerFile: number;
   maxTurns: number;
+  maxTotalBytes: number;
 }
 
 export const DEFAULT_AGENTIC_LIMITS: AgenticLimits = {
-  maxFiles: 80,
-  maxBytesPerFile: 1_000_000,
-  maxTurns: 30,
+  maxFiles: 20,
+  maxBytesPerFile: 20_000,
+  maxTurns: 10,
+  maxTotalBytes: 200_000,
 };
 
 export interface AgenticEnv {
@@ -58,7 +60,7 @@ export function makeAgenticEnv(opts: {
  *     accurate review-comment line numbers without arithmetic.
  *   - Dedup key is "path:start:end" — reading lines 1-100 does NOT
  *     block a follow-up read of lines 101-200 of the same file.
- *   - Budget is by RETURNED bytes (after slicing/truncation), so a
+ *   - Budget is by returned UTF-8 bytes including the truncation marker, so a
  *     small slice of a huge file barely spends from the per-file cap.
  */
 export async function executeReadFile(
@@ -72,7 +74,7 @@ export async function executeReadFile(
   }
 
   const cleanPath = path.trim();
-  if (cleanPath.startsWith('/') || cleanPath.includes('..')) {
+  if (!cleanPath || cleanPath.startsWith('/') || cleanPath.includes('..')) {
     return `error: invalid path '${cleanPath}' — must be a repo-relative path without leading "/" or ".."`;
   }
   if (env.excludePatterns.some(p => minimatch(cleanPath, p, { matchBase: true, dot: true }))) {
@@ -101,7 +103,18 @@ export async function executeReadFile(
     return `error: read budget exhausted — already read ${env.filesRead.size} files/slices (limit ${env.limits.maxFiles}). Submit your review now.`;
   }
 
-  const content = await env.github.getFileContent(cleanPath, env.ref, { quiet: true });
+  const bytesRead = () => Array.from(env.filesRead.values()).reduce((sum, size) => sum + size, 0);
+  if (bytesRead() >= env.limits.maxTotalBytes) {
+    return 'error: total read byte budget exhausted; submit your review now';
+  }
+  // Reserve before awaiting: providers can request many reads concurrently.
+  env.filesRead.set(dedupKey, 0);
+  let content: string;
+  try {
+    content = await env.github.getFileContent(cleanPath, env.ref, { quiet: true });
+  } catch {
+    return `error: could not read '${cleanPath}'`;
+  }
   if (!content) {
     env.filesRead.set(dedupKey, 0);
     return `error: '${cleanPath}' not found at PR head`;
@@ -125,17 +138,18 @@ export async function executeReadFile(
     .map((line, i) => `${String(startIdx + 1 + i).padStart(padTo, ' ')}: ${line}`)
     .join('\n');
 
-  const cap = env.limits.maxBytesPerFile;
-  if (numbered.length > cap) {
-    const out = `[truncated to ${cap} of ${numbered.length} bytes]\n${numbered.slice(0, cap)}`;
-    env.filesRead.set(dedupKey, cap);
-    core.info(`[agentic] read_file ${dedupKey} (${numbered.length} bytes, truncated to ${cap}) — ${reason}`);
-    return out;
+  const cap = Math.min(env.limits.maxBytesPerFile, env.limits.maxTotalBytes - bytesRead());
+  if (cap <= 0) return 'error: total read byte budget exhausted; submit your review now';
+  const bytes = Buffer.from(numbered, 'utf8');
+  let out = numbered;
+  if (bytes.length > cap) {
+    const marker = '[truncated]\n';
+    const prefix = Buffer.from(marker).subarray(0, cap).toString();
+    out = prefix + bytes.subarray(0, Math.max(0, cap - Buffer.byteLength(prefix))).toString('utf8').replace(/\uFFFD$/, '');
   }
-
-  env.filesRead.set(dedupKey, numbered.length);
-  core.info(`[agentic] read_file ${dedupKey} (${numbered.length} bytes) — ${reason}`);
-  return numbered;
+  env.filesRead.set(dedupKey, Buffer.byteLength(out, 'utf8'));
+  core.info(`[agentic] read_file ${dedupKey} (${Buffer.byteLength(out, 'utf8')} bytes) — ${reason}`);
+  return out;
 }
 
 function rangeKey(path: string, start?: number, end?: number): string {

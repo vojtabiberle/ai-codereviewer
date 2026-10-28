@@ -6,10 +6,14 @@ import { readFileSync } from 'fs';
 dotenv.config();
 
 // Load the PR ID
-const owner = process.argv[2] || 'keboola';
-const repo = process.argv[3] || 'connection';
-const pr_number = parseInt(process.argv[4], 10) || 982;
-const projectContext = process.argv[5] || 'This is a PHP project written in Symfony and Zend.';
+const owner = process.argv[2];
+const repo = process.argv[3];
+const pr_number = Number(process.argv[4]);
+const projectContext = process.argv[5] || '';
+
+if (!owner || !repo || !Number.isSafeInteger(pr_number) || pr_number <= 0) {
+  throw new Error('Usage: yarn test:e2e <owner> <repo> <pr_number> [project_context]');
+}
 
 // Read the PR payload
 const prPayload = JSON.parse(
@@ -30,13 +34,13 @@ process.env.GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.INPUT_GITHUB_
 
 // Set action inputs (these would normally come from action.yml)
 process.env.INPUT_GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-process.env.INPUT_AI_PROVIDER = process.env.INPUT_AI_PROVIDER || 'openai';
-process.env.INPUT_AI_API_KEY = process.env.INPUT_AI_API_KEY || process.env.OPENAI_API_KEY;
-process.env.INPUT_AI_MODEL = process.env.INPUT_AI_MODEL || 'gpt-4o-mini';
-// process.env.INPUT_REVIEW_MAX_COMMENTS = process.env.INPUT_REVIEW_MAX_COMMENTS || '10';
+process.env.INPUT_AI_PROVIDER = process.env.INPUT_AI_PROVIDER || process.env.AI_PROVIDER || 'openai';
+process.env.INPUT_AI_API_KEY = process.env.INPUT_AI_API_KEY || process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
+process.env.INPUT_AI_MODEL = process.env.INPUT_AI_MODEL || process.env.AI_MODEL || 'gpt-4o-mini';
+process.env.INPUT_AGENTIC_REVIEW = process.env.INPUT_AGENTIC_REVIEW || 'false';
 process.env.INPUT_EXCLUDE_PATTERNS = '**/*.lock,**/*.json,**/*.md';
 process.env.INPUT_APPROVE_REVIEWS = 'false';
-process.env.INPUT_REVIEW_PROJECT_CONTEXT = projectContext;
+process.env.INPUT_PROJECT_CONTEXT = projectContext;
 
 // Run the action
 require('../lib/src/main');

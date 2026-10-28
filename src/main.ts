@@ -11,16 +11,16 @@ async function main() {
   try {
     // Get inputs
     const provider = core.getInput('AI_PROVIDER');
-    const model = core.getInput('AI_MODEL');
-    const apiKey = core.getInput('AI_API_KEY');
+    const model = core.getInput('AI_MODEL', { required: true });
+    const apiKey = core.getInput('AI_API_KEY', { required: true });
     const baseURL = core.getInput('AI_BASE_URL');
-    const githubToken = core.getInput('GITHUB_TOKEN');
-    const temperature = parseFloat(core.getInput('AI_TEMPERATURE') || '0');
+    const githubToken = core.getInput('GITHUB_TOKEN', { required: true });
+    const temperature = parseNumberInput('AI_TEMPERATURE', 0, 0, 1);
 
     // Get new configuration inputs
     const approveReviews = core.getBooleanInput('APPROVE_REVIEWS');
-    const approveConfidenceThreshold = parseInt(core.getInput('APPROVE_CONFIDENCE_THRESHOLD') || '80', 10);
-    const maxComments = parseInt(core.getInput('MAX_COMMENTS') || '0', 10);
+    const approveConfidenceThreshold = parseNumberInput('APPROVE_CONFIDENCE_THRESHOLD', 80, 0, 100);
+    const maxComments = parseNumberInput('MAX_COMMENTS', 0, 0, Number.MAX_SAFE_INTEGER, true);
     const minCommentSeverity = (core.getInput('MIN_COMMENT_SEVERITY') || 'minor').toLowerCase();
 
     validateInputs({ provider, minCommentSeverity });
@@ -53,6 +53,7 @@ async function main() {
       githubService,
       diffService,
       {
+        maxInputBytes: parseNumberInput('MAX_INPUT_BYTES', 1_000_000, 1, Number.MAX_SAFE_INTEGER, true),
         maxComments,
         approveReviews,
         approveConfidenceThreshold,
@@ -96,26 +97,36 @@ function validateInputs({ provider, minCommentSeverity }: { provider: string; mi
   }
 }
 
-function parseAgenticLimitsFromInputs(): { maxFiles?: number; maxBytesPerFile?: number; maxTurns?: number } {
-  const out: { maxFiles?: number; maxBytesPerFile?: number; maxTurns?: number } = {};
+function parseAgenticLimitsFromInputs(): { maxFiles?: number; maxBytesPerFile?: number; maxTurns?: number; maxTotalBytes?: number } {
+  const out: { maxFiles?: number; maxBytesPerFile?: number; maxTurns?: number; maxTotalBytes?: number } = {};
   const maxFiles = parsePositiveInt(core.getInput('AGENTIC_MAX_FILES'), 'AGENTIC_MAX_FILES');
   if (maxFiles !== undefined) out.maxFiles = maxFiles;
   const maxBytes = parsePositiveInt(core.getInput('AGENTIC_MAX_BYTES_PER_FILE'), 'AGENTIC_MAX_BYTES_PER_FILE');
   if (maxBytes !== undefined) out.maxBytesPerFile = maxBytes;
   const maxTurns = parsePositiveInt(core.getInput('AGENTIC_MAX_TURNS'), 'AGENTIC_MAX_TURNS');
   if (maxTurns !== undefined) out.maxTurns = maxTurns;
+  const maxTotalBytes = parsePositiveInt(core.getInput('AGENTIC_MAX_TOTAL_BYTES'), 'AGENTIC_MAX_TOTAL_BYTES');
+  if (maxTotalBytes !== undefined) out.maxTotalBytes = maxTotalBytes;
   return out;
 }
 
 function parsePositiveInt(raw: string, label: string): number | undefined {
   const trimmed = (raw ?? '').trim();
   if (!trimmed) return undefined;
-  const n = Number.parseInt(trimmed, 10);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
-    core.warning(`Ignoring ${label}='${raw}' (must be a positive integer); falling back to default`);
-    return undefined;
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw new Error(`${label} must be a positive integer; got '${raw}'`);
   }
   return n;
+}
+
+function parseNumberInput(name: string, fallback: number, min: number, max: number, integer = false): number {
+  const raw = core.getInput(name).trim();
+  const value = raw ? Number(raw) : fallback;
+  if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isSafeInteger(value))) {
+    throw new Error(`${name} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}`);
+  }
+  return value;
 }
 
 function getProvider(provider: string) {

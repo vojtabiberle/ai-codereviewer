@@ -1,4 +1,4 @@
-# Review instructions for keboola/ai-codereviewer
+# Review instructions for vojtabiberle/ai-codereviewer
 
 This is the AI Code Reviewer GitHub Action itself. Reviews of this repo
 should help maintainers, not generate noise. Apply these rules in

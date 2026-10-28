@@ -91,6 +91,18 @@ index abc..def 100644
     });
   });
 
+  it('fetches first-review diffs using pinned base and head commits', async () => {
+    await new DiffService('token', '').getRelevantFiles(mockPRDetails);
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://api.github.com/repos/test-owner/test-repo/compare/main...feature', expect.anything());
+  });
+
+  it('pins update comparisons to the previously reviewed commit and current head', async () => {
+    await new DiffService('token', '').getRelevantFiles(mockPRDetails, 'old-sha');
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://api.github.com/repos/test-owner/test-repo/compare/old-sha...feature', expect.anything());
+  });
+
   it('should filter out excluded files', async () => {
     const service = new DiffService('mock-github-token', '**/*.md,**/*.json');
     const files = await service.getRelevantFiles(mockPRDetails);

@@ -73,7 +73,7 @@ describe('executeReadFile', () => {
       limits: { maxBytesPerFile: 100 },
     });
     const out = await executeReadFile(env, 'big.ts', 'why');
-    expect(out).toMatch(/^\[truncated to 100 of \d+ bytes\]/);
+    expect(out).toMatch(/^\[truncated\]/);
     expect(env.filesRead.get('big.ts')).toBe(100);
   });
 
@@ -172,5 +172,44 @@ describe('executeReadFile', () => {
       const second = await executeReadFile(env, 'a.ts', 'r', { startLine: 1, endLine: 3 });
       expect(second).toMatch(/already read/);
     });
+  });
+});
+
+
+describe('agentic shared budgets', () => {
+  it('reserves read slots before parallel fetches, including duplicate calls', async () => {
+    const github = fakeGithub({ 'a.ts': 'x', 'b.ts': 'y', 'c.ts': 'z' });
+    const env = makeAgenticEnv({ github, ref: 'H', excludePatterns: [], limits: { maxFiles: 2 } });
+    const results = await Promise.all(['a.ts', 'a.ts', 'b.ts', 'c.ts'].map(path => executeReadFile(env, path, 'r')));
+    expect(results[1]).toContain('already read');
+    expect(results[3]).toContain('budget exhausted');
+    expect(github.getFileContent).toHaveBeenCalledTimes(2);
+  });
+
+  it('caps aggregate UTF-8 output even for parallel non-ASCII reads', async () => {
+    const env = makeAgenticEnv({ github: fakeGithub({ 'a.ts': 'ž'.repeat(100), 'b.ts': '🙂'.repeat(100) }),
+      ref: 'H', excludePatterns: [], limits: { maxTotalBytes: 100, maxBytesPerFile: 60 } });
+    const results = await Promise.all(['a.ts', 'b.ts'].map(path => executeReadFile(env, path, 'r')));
+    const sizes = results.map(out => Buffer.byteLength(out, 'utf8'));
+    expect(sizes.every(size => size <= 60)).toBe(true);
+    expect(sizes.reduce((a, b) => a + b)).toBeLessThanOrEqual(100);
+    expect(results.join('')).not.toContain('�');
+    expect(Array.from(env.filesRead.values())).toEqual(sizes);
+  });
+
+  it('stops fetching once the aggregate budget is exhausted', async () => {
+    const github = fakeGithub({ 'a.ts': 'x'.repeat(100), 'b.ts': 'y' });
+    const env = makeAgenticEnv({ github, ref: 'H', excludePatterns: [], limits: { maxTotalBytes: 30 } });
+    await executeReadFile(env, 'a.ts', 'r');
+    expect(await executeReadFile(env, 'b.ts', 'r')).toContain('budget exhausted');
+    expect(github.getFileContent).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns fetch failures as tool errors while consuming the reserved slot', async () => {
+    const github = fakeGithub({});
+    (github.getFileContent as jest.Mock).mockRejectedValueOnce(new Error('network'));
+    const env = makeAgenticEnv({ github, ref: 'H', excludePatterns: [], limits: { maxFiles: 1 } });
+    expect(await executeReadFile(env, 'a.ts', 'r')).toContain('could not read');
+    expect(await executeReadFile(env, 'b.ts', 'r')).toContain('budget exhausted');
   });
 });

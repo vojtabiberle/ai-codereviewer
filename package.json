@@ -1,9 +1,9 @@
 {
-  "name": "ai-code-reviewer",
-  "version": "2.0.0",
-  "description": "Advanced AI-powered code reviews with multiple model support",
+  "name": "ai-codereviewer",
+  "version": "3.0.0",
+  "description": "GitHub Action for AI code review with bounded repository context",
   "main": "lib/src/main.js",
-  "author": "Luís Severgnini",
+  "author": "Lu\u00eds Severgnini",
   "license": "MIT",
   "scripts": {
     "build": "tsc",
@@ -15,7 +15,9 @@
     "precommit": "yarn lint && yarn test",
     "dev": "ts-node src/main.ts",
     "generate-pr-payload": "ts-node scripts/generate-pr-payload.ts",
-    "test:e2e": "yarn build && ts-node scripts/test-e2e.ts"
+    "test:e2e": "yarn build && ts-node scripts/test-e2e.ts",
+    "typecheck": "tsc --noEmit",
+    "test:bundle": "node --test scripts/smoke-bundle.cjs"
   },
   "dependencies": {
     "@actions/core": "^1.10.1",
@@ -46,5 +48,9 @@
   "engines": {
     "node": ">=24.0.0"
   },
-  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vojtabiberle/ai-codereviewer.git"
+  }
 }

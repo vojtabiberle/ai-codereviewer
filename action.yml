@@ -1,4 +1,4 @@
-name: "AI Code Review Action v2"
+name: "ai-codereviewer"
 description: "Advanced AI-powered code reviews with multiple model support"
 inputs:
   GITHUB_TOKEN:
@@ -11,7 +11,6 @@ inputs:
   AI_MODEL:
     description: "AI model to use"
     required: true
-    default: "gpt-4"
   AI_API_KEY:
     description: "API key for the chosen AI provider"
     required: true
@@ -23,9 +22,9 @@ inputs:
     required: false
     default: "0"
   APPROVE_REVIEWS:
-    description: "Whether to approve/reject PRs automatically"
+    description: "Allow AI approvals. Blocker comments may still request changes when false."
     required: false
-    default: "true"
+    default: "false"
   APPROVE_CONFIDENCE_THRESHOLD:
     description: "Minimum AI confidence (0-100) required to auto-approve. Below this, an 'approve' verdict is downgraded to 'comment'."
     required: false
@@ -42,10 +41,10 @@ inputs:
     description: "Additional context about the project (inline string)."
     required: false
   PROJECT_CONTEXT_FILE:
-    description: "Path (in the PR head) to a file containing the project context. When set and present, takes precedence over PROJECT_CONTEXT. Skipped silently if missing."
+    description: "Path (in the trusted PR base commit) to a file containing the project context. When set and present, takes precedence over PROJECT_CONTEXT. Skipped silently if missing."
     required: false
   INSTRUCTIONS_FILE:
-    description: "Path (in the PR head) to a Markdown file with repo-specific reviewer instructions. Skipped silently if missing. Combined with INSTRUCTIONS_URL when both are set (URL first as baseline, file appended as repo-specific override)."
+    description: "Path (in the trusted PR base commit) to a Markdown file with repo-specific reviewer instructions. Skipped silently if missing. Combined with INSTRUCTIONS_URL when both are set (URL first as baseline, file appended as repo-specific override)."
     required: false
     default: ".github/ai-review.md"
   INSTRUCTIONS_URL:
@@ -63,7 +62,7 @@ inputs:
     required: false
     default: "**/*.lock,**/*.json,**/*.md"
   CONFIG_FILE:
-    description: "Path (in the PR head) to a YAML file whose top-level keys override action inputs for this repo. Useful when the action runs from an org-level Required Workflow and individual repos need to tune knobs without editing the central workflow. Skipped silently if missing."
+    description: "Path (in the trusted PR base commit) to a YAML file whose top-level keys override action inputs for this repo. Useful when the action runs from an org-level Required Workflow and individual repos need to tune knobs without editing the central workflow. Skipped silently if missing."
     required: false
     default: ".github/ai-review.yml"
   AGENTIC_REVIEW:
@@ -73,15 +72,21 @@ inputs:
   AGENTIC_MAX_FILES:
     description: "Per-session cap on distinct (path, range) reads the model may make during an agentic review. Ignored when AGENTIC_REVIEW is false."
     required: false
-    default: "80"
+    default: "20"
   AGENTIC_MAX_BYTES_PER_FILE:
     description: "Per-read byte cap for read_file during an agentic review. Larger payloads are truncated. Ignored when AGENTIC_REVIEW is false."
     required: false
-    default: "1000000"
+    default: "20000"
   AGENTIC_MAX_TURNS:
     description: "Maximum number of model turns in the agentic loop before the session is forced to end. Ignored when AGENTIC_REVIEW is false."
     required: false
-    default: "30"
+    default: "10"
+  AGENTIC_MAX_TOTAL_BYTES:
+    description: "Total UTF-8 output byte budget for all agentic read_file calls. Repository configuration can only lower this limit."
+    default: "200000"
+  MAX_INPUT_BYTES:
+    description: "Maximum UTF-8 size of the initial system prompt and user payload. Oversized reviews fail before calling the model."
+    default: "1000000"
 runs:
   using: "node24"
   main: "dist/index.js"

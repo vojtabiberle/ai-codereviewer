@@ -10,8 +10,4 @@ context_files:
   - action.yml
   - README.md
 
-# This repo is large enough that the model often needs to fetch helpers / types /
-# tests not in the diff. Enable agentic mode so it can call read_file(path) on
-# demand instead of guessing. Cost trade-off: more turns, more tokens; gain:
-# materially fewer wrong comments rooted in missing context.
-agentic_review: true
+# Agentic mode must be enabled explicitly in the trusted workflow.

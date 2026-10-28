@@ -10,11 +10,11 @@ if (!token) {
   console.warn('\x1b[33mWarning: GITHUB_TOKEN environment variable is not set. Some GitHub API operations may be rate-limited without authentication.\x1b[0m');
 }
 
-const owner = process.argv[2] || 'keboola';
-const repo = process.argv[3] || 'connection';
-const pr_number = parseInt(process.argv[4], 10) || 982;
+const owner = process.argv[2];
+const repo = process.argv[3];
+const pr_number = Number(process.argv[4]);
 
-if (!owner || !repo || isNaN(pr_number)) {
+if (!owner || !repo || !Number.isSafeInteger(pr_number) || pr_number <= 0) {
   console.error('Usage: ts-node generate-pr-payload.ts [owner] [repo] [pr_number]');
   process.exit(1);
 }
@@ -53,8 +53,12 @@ async function generatePRPayload() {
   };
 
   const fileName = `scripts/pull-requests/test-pr-payload-${pr_number}.json`;
+  fs.mkdirSync('scripts/pull-requests', { recursive: true });
   fs.writeFileSync(fileName, JSON.stringify(payload, null, 2));
   console.log(`Payload saved to ${fileName}`);
 }
 
-generatePRPayload().catch(console.error);
+generatePRPayload().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
