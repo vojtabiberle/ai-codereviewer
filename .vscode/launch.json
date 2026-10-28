@@ -5,24 +5,19 @@
       "request": "launch",
       "name": "Launch Program",
       "program": "${workspaceFolder}/${input:programPath}",
-      "args": [
-            "keboola",
-            "connection",
-            "5576"
-        ],
       "preLaunchTask": "build"
     },
     {
-        "type": "node",
-        "request": "launch",
-        "name": "Launch Program (test:e2e keboola connection 5576)",
-        "program": "${workspaceFolder}/scripts/test-e2e.ts",
-        "args": [
-            "keboola",
-            "connection",
-            "5576"
-        ],
-        "preLaunchTask": "build"
+      "type": "node",
+      "request": "launch",
+      "name": "Live review (posts to selected PR)",
+      "program": "${workspaceFolder}/lib/scripts/test-e2e.js",
+      "args": [
+        "${input:owner}",
+        "${input:repo}",
+        "${input:prNumber}"
+      ],
+      "preLaunchTask": "build"
     }
   ],
   "inputs": [
@@ -34,6 +29,23 @@
         "lib/src/main.js",
         "src/main.ts"
       ]
+    },
+    {
+      "type": "promptString",
+      "id": "owner",
+      "description": "GitHub repository owner",
+      "default": "vojtabiberle"
+    },
+    {
+      "type": "promptString",
+      "id": "repo",
+      "description": "GitHub repository name",
+      "default": "ai-codereviewer"
+    },
+    {
+      "type": "promptString",
+      "id": "prNumber",
+      "description": "PR number to review (posts a review and uses API credit)"
     }
   ]
 }

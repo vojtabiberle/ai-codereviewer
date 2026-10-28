@@ -2,10 +2,10 @@
 
 Name and destination: `vojtabiberle/ai-codereviewer`.
 
-1. Preserve the complete main-branch ancestry through Keboola commit `295c24b`,
+1. Preserve the complete main-branch ancestry through commit `295c24b`,
    with original commit IDs, contributors and MIT attribution.
-2. Replace organization defaults with provider-neutral setup. Retain an isolated
-   Keboola example and explicit CLI arguments. Incorporate the upstream script
+2. Replace organization defaults with provider-neutral setup and explicit CLI
+   arguments. Incorporate the upstream script
    argument/environment fixes without restoring organization-specific defaults.
 3. Add read-only CI for types, mocked tests and reproducible committed bundles.
    Replace the bot-push rebuild workflow with a bundle freshness check.

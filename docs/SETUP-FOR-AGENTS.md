@@ -50,6 +50,3 @@ secrets. Fork PRs are skipped. CI runs independently without these credentials.
 | Review exceeds input budget | Narrow excluded files/context or explicitly raise the workflow cap. |
 | Stale head failure | Re-run on the latest commit; no stale review should be published. |
 | Bundle check fails | Run `yarn package` on Node.js 24 and commit `dist/`. |
-
-Organization-specific names belong in separate examples. See
-[Keboola](examples/keboola.md).

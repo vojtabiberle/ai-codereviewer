@@ -4,8 +4,7 @@ GitHub Action for AI code review using OpenAI, Anthropic or Google Gemini.
 Reviews PR diffs, posts inline comments, avoids repeated comments, and optionally
 reads repository files through a bounded tool loop.
 
-This fork continues [lfsevergnini/ai-codereviewer](https://github.com/lfsevergnini/ai-codereviewer)
-and the development in [keboola/ai-codereviewer](https://github.com/keboola/ai-codereviewer).
+This fork continues [lfsevergnini/ai-codereviewer](https://github.com/lfsevergnini/ai-codereviewer).
 Original Git history, contributor attribution and [MIT license](LICENCE) are retained.
 
 ## Setup
@@ -48,8 +47,7 @@ jobs:
 
 No checkout or dependency installation is needed in consumer repositories.
 The action runs the committed `dist/index.js` bundle on Node.js 24.
-See [agent setup runbook](docs/SETUP-FOR-AGENTS.md) and the isolated
-[Keboola organization example](docs/examples/keboola.md).
+See [agent setup runbook](docs/SETUP-FOR-AGENTS.md).
 
 ## Configuration
 
