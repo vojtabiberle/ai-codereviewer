@@ -20,7 +20,8 @@ Name and destination: `vojtabiberle/ai-codereviewer`.
 
 ## Compatibility changes
 
-- Automatic approval defaults to false.
+- Automatic approval defaults to false. Set `AI_MODEL` explicitly; there is no
+  default model identifier.
 - Configuration, local instructions and project-context files come from the base
   SHA. New policy in a PR takes effect after merge.
 - Repository YAML can only disable approval/agentic mode, raise the confidence
@@ -30,6 +31,6 @@ Name and destination: `vojtabiberle/ai-codereviewer`.
 - Initial prompt and user payload have a new 1 MB cap; oversized reviews fail
   before the first model call. All byte limits use UTF-8.
 - Local scripts require explicit owner, repository and PR number; the live-test
-  script posts comment-only reviews by default.
+  script disables automatic approvals; blocker findings may request changes.
 - Consumers must commit generated bundles; CI no longer pushes rebuild commits.
 - No consumer repository or organization secret is migrated automatically.

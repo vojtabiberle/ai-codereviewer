@@ -168,8 +168,7 @@ yarn generate-pr-payload <owner> <repo> <pr_number>
 yarn test:e2e <owner> <repo> <pr_number>
 ```
 
-**The live test posts a review to that PR and spends API credit.** It defaults to
-comment-only mode. The script accepts both `INPUT_AI_*` and `AI_*` environment
+**The live test posts a review to that PR and spends API credit.** Automatic approvals are disabled; blocker findings can still request changes. The script accepts both `INPUT_AI_*` and `AI_*` environment
 variables. `OPENAI_API_KEY` remains a fallback for the OpenAI API key.
 
 See [migration plan and compatibility notes](docs/MIGRATION.md).
