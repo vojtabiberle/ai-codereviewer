@@ -170,3 +170,5 @@ yarn test:e2e <owner> <repo> <pr_number>
 variables. `OPENAI_API_KEY` remains a fallback for the OpenAI API key.
 
 See [migration plan and compatibility notes](docs/MIGRATION.md).
+
+Proposed improvements are tracked individually in the [idea backlog](docs/ideas/README.md).
