@@ -2,8 +2,9 @@
 
 These are independent discussion items, not approved implementation tasks or a
 release commitment. No runtime behavior changes with this backlog. Each idea
-includes a problem, proposal, acceptance criteria and questions to settle before
-implementation.
+includes a problem, proposal, acceptance criteria and the questions to settle
+before implementation. [001](001-reviewed-commit-sha.md) and [002](002-review-history-loading.md)
+record settled answers; the others still have open questions.
 
 Proposed priorities: P0 correctness prerequisites; P1 comment lifecycle and shared
 foundations; P2 user controls, provider integrations and evaluation; P3 later,
@@ -32,6 +33,10 @@ need-driven extensions. Priority does not automatically authorize implementation
 ## Suggested sequence
 
 1. Correct previous-review identity and history loading (001–002).
+   Within that work: resolve the bot identity and write the review marker;
+   load history once over REST (002); select the baseline from `commit_id`
+   and compare status, with a full-review fallback (001); take valid comment
+   lines from the pull request diff.
 2. Define stable finding identity (003) and publication idempotency (008).
 3. Continue existing threads, respect human resolution and maintain one summary
    (004–005, 007). Fix verification/auto-resolution is a separate opt-in design (006).
