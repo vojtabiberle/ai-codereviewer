@@ -177,12 +177,14 @@ yarn test:e2e <owner> <repo> <pr_number>
 **The live test posts a review to that PR and spends API credit.** Automatic approvals are disabled; blocker findings can still request changes. The script accepts both `INPUT_AI_*` and `AI_*` environment
 variables. `OPENAI_API_KEY` remains a fallback for the OpenAI API key.
 
-To check bot identity against api.github.com without a model key, open Actions →
-**Bot identity** → **Run workflow** on this repository. The log line is
-`Bot identity: login=… databaseId=… source=graphql|rest|fallback`. The default
-job uses `github.token`. The GitHub App job resolves `BOT_IDENTITY_APP_TOKEN`
-when that secret is set, and skips the check when it is absent. The workflow
-does not post a review.
+Pull requests that change `src/`, `dist/`, `action.yml`, or the bot-identity
+workflow run that check with the default `GITHUB_TOKEN`. It does not post a
+review. After the workflow file is on the default branch, Actions → **Bot
+identity** → **Run workflow** runs the same check. The log line is
+`Bot identity: login=… databaseId=… source=graphql|rest|fallback`. The GitHub
+App job uses `BOT_IDENTITY_APP_TOKEN` when that secret is set. It skips the
+check when the secret is absent, and the job is skipped on fork pull requests,
+which do not receive secrets.
 
 See [migration plan and compatibility notes](docs/MIGRATION.md).
 
