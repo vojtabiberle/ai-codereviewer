@@ -10,6 +10,15 @@ import { readFileSync } from 'fs';
 
 async function main() {
   try {
+    if (isIdentityOnly()) {
+      const githubToken = core.getInput('GITHUB_TOKEN', { required: true });
+      const identity = await new GitHubService(githubToken).getBotIdentity();
+      if (!identity) {
+        throw new Error('Bot identity could not be resolved');
+      }
+      return;
+    }
+
     // Get inputs
     const provider = core.getInput('AI_PROVIDER');
     const model = core.getInput('AI_MODEL', { required: true });
@@ -86,6 +95,13 @@ async function main() {
   } catch (error: unknown) {
     core.setFailed(`Action failed: ${(error as Error).message}`);
   }
+}
+
+function isIdentityOnly(): boolean {
+  const raw = core.getInput('IDENTITY_ONLY').trim().toLowerCase();
+  if (!raw || raw === 'false') return false;
+  if (raw === 'true') return true;
+  throw new Error(`IDENTITY_ONLY must be true or false; got '${raw}'`);
 }
 
 const VALID_PROVIDERS = ['openai', 'anthropic', 'google'] as const;

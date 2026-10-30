@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'crypto';
 import { Octokit } from '@octokit/rest';
 import * as core from '@actions/core';
 import { ReviewResponse } from '../providers/AIProvider';
@@ -13,11 +14,21 @@ export interface PRDetails {
   head: string;
 }
 
+export type BotIdentitySource = 'graphql' | 'rest' | 'fallback';
+
 /** Login and numeric user id of the token that publishes reviews. */
 export interface BotIdentity {
   login: string;
   id: number | null;
+  source: BotIdentitySource;
 }
+
+/**
+ * github.com user id of `github-actions[bot]`. Used only when the API cannot
+ * be asked and the action token is the job's default `GITHUB_TOKEN`.
+ */
+export const GITHUB_ACTIONS_BOT_ID = 41898282;
+const GITHUB_ACTIONS_BOT_LOGIN = 'github-actions[bot]';
 
 interface ViewerQuery {
   viewer: {
@@ -35,12 +46,14 @@ export interface GitHubServiceOptions {
 
 export class GitHubService {
   private octokit: Octokit;
+  private token: string;
   private owner: string;
   private repo: string;
   private reviewerIdOverride?: string;
   private botIdentityPromise?: Promise<BotIdentity | null>;
 
   constructor(token: string, options?: GitHubServiceOptions) {
+    this.token = token;
     this.octokit = new Octokit({ auth: token });
     [this.owner, this.repo] = (process.env.GITHUB_REPOSITORY ?? '/').split('/');
     const reviewerId = options?.reviewerId?.trim();
@@ -53,9 +66,10 @@ export class GitHubService {
    * Installation tokens (the default GITHUB_TOKEN and any other GitHub App
    * token) cannot call GET /user. GraphQL `viewer` returns that app's bot
    * login and database id for both of those, and for a PAT. GET /user is
-   * only the fallback. A total failure does not guess github-actions[bot]:
-   * that login is shared by every workflow and is the wrong app for any
-   * other installation token.
+   * the next attempt. If both fail and this token is the job's `GITHUB_TOKEN`
+   * env var, the identity is github-actions[bot]. Any other token stays
+   * unresolved: that login is shared by every workflow and is the wrong app
+   * for an installation token.
    */
   async getBotIdentity(): Promise<BotIdentity | null> {
     if (!this.botIdentityPromise) {
@@ -70,15 +84,33 @@ export class GitHubService {
 
   private async resolveBotIdentity(): Promise<BotIdentity | null> {
     const fromGraphql = await this.identityFromGraphql();
-    if (fromGraphql) return fromGraphql;
+    if (fromGraphql) return this.logIdentity(fromGraphql);
 
     const fromRest = await this.identityFromRest();
-    if (fromRest) return fromRest;
+    if (fromRest) return this.logIdentity(fromRest);
+
+    if (isDefaultWorkflowToken(this.token)) {
+      core.debug(
+        'GraphQL viewer and GET /user failed; token matches the workflow GITHUB_TOKEN, using github-actions[bot]'
+      );
+      return this.logIdentity({
+        login: GITHUB_ACTIONS_BOT_LOGIN,
+        id: GITHUB_ACTIONS_BOT_ID,
+        source: 'fallback',
+      });
+    }
 
     core.warning(
-      'Failed to resolve bot identity; not assuming github-actions[bot]. Previous reviews by this action cannot be matched on this run.'
+      'Failed to resolve bot identity for this token; not assuming github-actions[bot]. Previous reviews by this action cannot be matched on this run.'
     );
     return null;
+  }
+
+  private logIdentity(identity: BotIdentity): BotIdentity {
+    core.info(
+      `Bot identity: login=${identity.login} databaseId=${identity.id ?? 'unknown'} source=${identity.source}`
+    );
+    return identity;
   }
 
   private async identityFromGraphql(): Promise<BotIdentity | null> {
@@ -95,7 +127,7 @@ export class GitHubService {
       if (id === null) {
         core.debug('GraphQL viewer returned a login without databaseId');
       }
-      return { login, id };
+      return { login, id, source: 'graphql' };
     } catch (error) {
       core.debug(`GraphQL viewer failed (${formatError(error)}); trying GET /user`);
       return null;
@@ -112,7 +144,7 @@ export class GitHubService {
       }
       const id = typeof data.id === 'number' ? data.id : null;
       core.debug(`Resolved bot identity via GET /user: login=${login} id=${id ?? 'unknown'}`);
-      return { login, id };
+      return { login, id, source: 'rest' };
     } catch (error) {
       const status = httpStatus(error);
       if (status === 401 || status === 403 || status === 404) {
@@ -435,6 +467,26 @@ export class GitHubService {
 
     return botReviewsWithComments;
   }
+}
+
+/**
+ * True when `token` is the job's default Actions token.
+ *
+ * The runner injects that credential as `GITHUB_TOKEN`. The action input is a
+ * separate `INPUT_GITHUB_TOKEN` value. They match when the workflow passes
+ * `secrets.GITHUB_TOKEN` / `github.token` and does not replace the
+ * `GITHUB_TOKEN` environment variable. Installation tokens and PATs differ
+ * from that env var, so a failed `viewer` query must not assume
+ * `github-actions[bot]` for them. Token bytes are compared in constant time
+ * and are never logged.
+ */
+function isDefaultWorkflowToken(token: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const workflowToken = env.GITHUB_TOKEN ?? '';
+  if (!token || !workflowToken) return false;
+  const left = Buffer.from(token);
+  const right = Buffer.from(workflowToken);
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
 }
 
 function normalizeDatabaseId(value: unknown): number | null {

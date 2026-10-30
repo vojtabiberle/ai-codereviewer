@@ -1,0 +1,54 @@
+# Manual check of bot identity against api.github.com. No model key and no review.
+# Actions → Bot identity → Run workflow.
+# Optional: set secret BOT_IDENTITY_APP_TOKEN to a GitHub App installation token.
+name: Bot identity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  default-token:
+    name: Default GITHUB_TOKEN
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          IDENTITY_ONLY: 'true'
+          AI_PROVIDER: openai
+          AI_MODEL: unused
+          AI_API_KEY: unused
+
+  app-token:
+    name: GitHub App token
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - id: gate
+        env:
+          APP_TOKEN: ${{ secrets.BOT_IDENTITY_APP_TOKEN }}
+        run: |
+          if [ -n "$APP_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "BOT_IDENTITY_APP_TOKEN is unset; skipping the GitHub App identity check."
+          fi
+      - if: steps.gate.outputs.configured == 'true'
+        uses: ./
+        with:
+          GITHUB_TOKEN: ${{ secrets.BOT_IDENTITY_APP_TOKEN }}
+          IDENTITY_ONLY: 'true'
+          AI_PROVIDER: openai
+          AI_MODEL: unused
+          AI_API_KEY: unused

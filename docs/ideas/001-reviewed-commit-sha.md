@@ -5,15 +5,51 @@ Priority: P0 (proposed).
 
 ## Implementation progress
 
-Step 1 is implemented. Bot identity uses GraphQL `viewer { login databaseId }`,
-with REST `GET /user` only as a fallback. If both fail, the run warns and does
-not assume `github-actions[bot]`. Every published review body includes the hidden
-marker (`status=complete`, or `status=degraded` on the summary-only publish after
-a 422 for comment locations). `REVIEWER_ID` is an optional action input and is
-not read from repository YAML. A version-tolerant parser ignores unmarked
-reviews. Baseline selection, the compare-status check, and the full-review
-fallback are not implemented. History loading ([002](002-review-history-loading.md))
-is unchanged, aside from using the resolved login when it looks up this bot.
+Step 1 is implemented. Bot identity uses GraphQL `viewer { login databaseId }`
+(`source=graphql`). REST `GET /user` is the next attempt (`source=rest`). If both
+fail and the action token equals the job's `GITHUB_TOKEN` environment variable,
+the identity is `github-actions[bot]` with github.com user id `41898282`
+(`source=fallback`). Any other token leaves identity unresolved and the run
+warns. The comparison is the action input against `process.env.GITHUB_TOKEN`
+(constant-time, never logged). A workflow that replaces that environment
+variable changes which credential counts as the default token. `41898282` is the
+github.com user id and is used only for this outage fallback; a successful API
+response supplies the id instead.
+
+Every published review body includes one hidden marker. The bytes are defined
+below. `status=degraded` is the summary-only publish after a 422 for comment
+locations. `REVIEWER_ID` is an optional action input and is not read from
+repository YAML. A version-tolerant parser ignores unmarked reviews. Baseline
+selection, the compare-status check, and the full-review fallback are not
+implemented. History loading ([002](002-review-history-loading.md)) is unchanged,
+aside from using the resolved login when it looks up this bot.
+
+## Review marker format
+
+The marker is one HTML comment at the end of the review body:
+
+`<!-- ai-codereviewer:review v=1 reviewer=<id> sha=<head> base=<base> status=<status> -->`
+
+Attributes are space-separated `key=value` tokens. `sha` and `base` are 7–64 hex
+characters. `status` is `complete` or `degraded` (the parser also keeps any other
+lowercase status token). Unknown attributes are ignored. The last valid marker
+in the body wins. A reviewer id is written raw when it matches
+`^[A-Za-z0-9._/@+:-]+$` and does not contain `--`. Any other id is
+percent-encoded (`encodeURIComponent`, then each `-` as `%2D`) so spaces and
+`--` cannot break the token or the HTML comment. The parser decodes percent-encoding
+and also accepts a double-quoted value (`reviewer="Code Review/job"`).
+
+Golden bytes, with `sha` of 40 `a` characters and `base` of 40 `b` characters:
+
+- raw `CI/review`:
+  `<!-- ai-codereviewer:review v=1 reviewer=CI/review sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb status=complete -->`
+- spaced `Code Review/job`:
+  `<!-- ai-codereviewer:review v=1 reviewer=Code%20Review%2Fjob sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb status=complete -->`
+- double hyphen `foo--bar`:
+  `<!-- ai-codereviewer:review v=1 reviewer=foo%2D%2Dbar sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb status=complete -->`
+
+A single hyphen stays raw: `reviewer=my-workflow/job`. These strings are locked
+by `tests/unit/reviewMarker.test.ts`.
 
 ## Problem
 

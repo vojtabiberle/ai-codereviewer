@@ -52,6 +52,14 @@ const fs_1 = __nccwpck_require__(9896);
 async function main() {
     var _a, _b;
     try {
+        if (isIdentityOnly()) {
+            const githubToken = core.getInput('GITHUB_TOKEN', { required: true });
+            const identity = await new GitHubService_1.GitHubService(githubToken).getBotIdentity();
+            if (!identity) {
+                throw new Error('Bot identity could not be resolved');
+            }
+            return;
+        }
         // Get inputs
         const provider = core.getInput('AI_PROVIDER');
         const model = core.getInput('AI_MODEL', { required: true });
@@ -116,6 +124,14 @@ async function main() {
     catch (error) {
         core.setFailed(`Action failed: ${error.message}`);
     }
+}
+function isIdentityOnly() {
+    const raw = core.getInput('IDENTITY_ONLY').trim().toLowerCase();
+    if (!raw || raw === 'false')
+        return false;
+    if (raw === 'true')
+        return true;
+    throw new Error(`IDENTITY_ONLY must be true or false; got '${raw}'`);
 }
 const VALID_PROVIDERS = ['openai', 'anthropic', 'google'];
 const VALID_SEVERITIES = ['blocker', 'major', 'minor', 'nit'];
@@ -1744,14 +1760,22 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.GitHubService = void 0;
+exports.GitHubService = exports.GITHUB_ACTIONS_BOT_ID = void 0;
+const crypto_1 = __nccwpck_require__(6982);
 const rest_1 = __nccwpck_require__(5772);
 const core = __importStar(__nccwpck_require__(7484));
 const reviewMarker_1 = __nccwpck_require__(761);
+/**
+ * github.com user id of `github-actions[bot]`. Used only when the API cannot
+ * be asked and the action token is the job's default `GITHUB_TOKEN`.
+ */
+exports.GITHUB_ACTIONS_BOT_ID = 41898282;
+const GITHUB_ACTIONS_BOT_LOGIN = 'github-actions[bot]';
 const VIEWER_QUERY = 'query { viewer { login databaseId } }';
 class GitHubService {
     constructor(token, options) {
         var _a, _b;
+        this.token = token;
         this.octokit = new rest_1.Octokit({ auth: token });
         [this.owner, this.repo] = ((_a = process.env.GITHUB_REPOSITORY) !== null && _a !== void 0 ? _a : '/').split('/');
         const reviewerId = (_b = options === null || options === void 0 ? void 0 : options.reviewerId) === null || _b === void 0 ? void 0 : _b.trim();
@@ -1763,9 +1787,10 @@ class GitHubService {
      * Installation tokens (the default GITHUB_TOKEN and any other GitHub App
      * token) cannot call GET /user. GraphQL `viewer` returns that app's bot
      * login and database id for both of those, and for a PAT. GET /user is
-     * only the fallback. A total failure does not guess github-actions[bot]:
-     * that login is shared by every workflow and is the wrong app for any
-     * other installation token.
+     * the next attempt. If both fail and this token is the job's `GITHUB_TOKEN`
+     * env var, the identity is github-actions[bot]. Any other token stays
+     * unresolved: that login is shared by every workflow and is the wrong app
+     * for an installation token.
      */
     async getBotIdentity() {
         if (!this.botIdentityPromise) {
@@ -1780,12 +1805,25 @@ class GitHubService {
     async resolveBotIdentity() {
         const fromGraphql = await this.identityFromGraphql();
         if (fromGraphql)
-            return fromGraphql;
+            return this.logIdentity(fromGraphql);
         const fromRest = await this.identityFromRest();
         if (fromRest)
-            return fromRest;
-        core.warning('Failed to resolve bot identity; not assuming github-actions[bot]. Previous reviews by this action cannot be matched on this run.');
+            return this.logIdentity(fromRest);
+        if (isDefaultWorkflowToken(this.token)) {
+            core.debug('GraphQL viewer and GET /user failed; token matches the workflow GITHUB_TOKEN, using github-actions[bot]');
+            return this.logIdentity({
+                login: GITHUB_ACTIONS_BOT_LOGIN,
+                id: exports.GITHUB_ACTIONS_BOT_ID,
+                source: 'fallback',
+            });
+        }
+        core.warning('Failed to resolve bot identity for this token; not assuming github-actions[bot]. Previous reviews by this action cannot be matched on this run.');
         return null;
+    }
+    logIdentity(identity) {
+        var _a;
+        core.info(`Bot identity: login=${identity.login} databaseId=${(_a = identity.id) !== null && _a !== void 0 ? _a : 'unknown'} source=${identity.source}`);
+        return identity;
     }
     async identityFromGraphql() {
         var _a;
@@ -1802,7 +1840,7 @@ class GitHubService {
             if (id === null) {
                 core.debug('GraphQL viewer returned a login without databaseId');
             }
-            return { login, id };
+            return { login, id, source: 'graphql' };
         }
         catch (error) {
             core.debug(`GraphQL viewer failed (${formatError(error)}); trying GET /user`);
@@ -1820,7 +1858,7 @@ class GitHubService {
             }
             const id = typeof data.id === 'number' ? data.id : null;
             core.debug(`Resolved bot identity via GET /user: login=${login} id=${id !== null && id !== void 0 ? id : 'unknown'}`);
-            return { login, id };
+            return { login, id, source: 'rest' };
         }
         catch (error) {
             const status = httpStatus(error);
@@ -2089,6 +2127,28 @@ class GitHubService {
     }
 }
 exports.GitHubService = GitHubService;
+/**
+ * True when `token` is the job's default Actions token.
+ *
+ * The runner injects that credential as `GITHUB_TOKEN`. The action input is a
+ * separate `INPUT_GITHUB_TOKEN` value. They match when the workflow passes
+ * `secrets.GITHUB_TOKEN` / `github.token` and does not replace the
+ * `GITHUB_TOKEN` environment variable. Installation tokens and PATs differ
+ * from that env var, so a failed `viewer` query must not assume
+ * `github-actions[bot]` for them. Token bytes are compared in constant time
+ * and are never logged.
+ */
+function isDefaultWorkflowToken(token, env = process.env) {
+    var _a;
+    const workflowToken = (_a = env.GITHUB_TOKEN) !== null && _a !== void 0 ? _a : '';
+    if (!token || !workflowToken)
+        return false;
+    const left = Buffer.from(token);
+    const right = Buffer.from(workflowToken);
+    if (left.length !== right.length)
+        return false;
+    return (0, crypto_1.timingSafeEqual)(left, right);
+}
 function normalizeDatabaseId(value) {
     return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }

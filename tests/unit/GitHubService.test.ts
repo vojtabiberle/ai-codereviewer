@@ -183,25 +183,38 @@ describe('GitHubService.submitReview', () => {
 });
 
 describe('GitHubService bot identity', () => {
+  const savedWorkflowToken = process.env.GITHUB_TOKEN;
+
   beforeEach(() => {
     getAuthenticated.mockReset();
     graphql.mockReset();
     listReviews.mockReset();
     listReviewComments.mockReset().mockResolvedValue({ data: [], headers: {} });
     process.env.GITHUB_REPOSITORY = 'octocat/hello';
+    delete process.env.GITHUB_TOKEN;
+  });
+
+  afterAll(() => {
+    if (savedWorkflowToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = savedWorkflowToken;
   });
 
   it('resolves the default GITHUB_TOKEN bot from GraphQL viewer', async () => {
     graphql.mockResolvedValue({ viewer: { login: 'github-actions[bot]', databaseId: 41898282 } });
     const debugSpy = jest.spyOn(require('@actions/core'), 'debug').mockImplementation(() => {});
+    const infoSpy = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
 
     const identity = await new GitHubService('ghs_actions').getBotIdentity();
 
-    expect(identity).toEqual({ login: 'github-actions[bot]', id: 41898282 });
+    expect(identity).toEqual({ login: 'github-actions[bot]', id: 41898282, source: 'graphql' });
     expect(getAuthenticated).not.toHaveBeenCalled();
     expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('GraphQL viewer'));
     expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('github-actions[bot]'));
+    expect(infoSpy).toHaveBeenCalledWith(
+      'Bot identity: login=github-actions[bot] databaseId=41898282 source=graphql'
+    );
     debugSpy.mockRestore();
+    infoSpy.mockRestore();
   });
 
   it('resolves a GitHub App installation token from GraphQL viewer', async () => {
@@ -209,7 +222,7 @@ describe('GitHubService bot identity', () => {
 
     const identity = await new GitHubService('ghs_app').getBotIdentity();
 
-    expect(identity).toEqual({ login: 'my-app[bot]', id: 12345 });
+    expect(identity).toEqual({ login: 'my-app[bot]', id: 12345, source: 'graphql' });
     expect(getAuthenticated).not.toHaveBeenCalled();
   });
 
@@ -219,7 +232,7 @@ describe('GitHubService bot identity', () => {
 
     const identity = await new GitHubService('ghs_app').getBotIdentity();
 
-    expect(identity).toEqual({ login: 'my-app[bot]', id: null });
+    expect(identity).toEqual({ login: 'my-app[bot]', id: null, source: 'graphql' });
     expect(getAuthenticated).not.toHaveBeenCalled();
     expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('without databaseId'));
     debugSpy.mockRestore();
@@ -233,7 +246,7 @@ describe('GitHubService bot identity', () => {
 
     const identity = await new GitHubService('ghp_pat').getBotIdentity();
 
-    expect(identity).toEqual({ login: 'octocat', id: 7 });
+    expect(identity).toEqual({ login: 'octocat', id: 7, source: 'rest' });
     expect(warnSpy).not.toHaveBeenCalled();
     expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('trying GET /user'));
     expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('GET /user'));
@@ -258,13 +271,57 @@ describe('GitHubService bot identity', () => {
     await expect(new GitHubService('ghp_pat').getBotLogin()).resolves.toBe('octocat');
   });
 
-  it('does not assume github-actions[bot] when viewer and GET /user both fail', async () => {
+  it('assumes github-actions[bot] when viewer fails and the token is the workflow GITHUB_TOKEN', async () => {
+    const token = 'ghs_default_workflow_token';
+    process.env.GITHUB_TOKEN = token;
+    graphql.mockRejectedValue(Object.assign(new Error('viewer down'), { status: 403 }));
+    getAuthenticated.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+    const warnSpy = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
+    const infoSpy = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
+    const debugSpy = jest.spyOn(require('@actions/core'), 'debug').mockImplementation(() => {});
+
+    const service = new GitHubService(token);
+    await expect(service.getBotIdentity()).resolves.toEqual({
+      login: 'github-actions[bot]',
+      id: 41898282,
+      source: 'fallback',
+    });
+    await service.getBotLogin();
+
+    expect(graphql).toHaveBeenCalledTimes(1);
+    expect(getAuthenticated).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('matches the workflow GITHUB_TOKEN'));
+    expect(infoSpy).toHaveBeenCalledTimes(1);
+    expect(infoSpy).toHaveBeenCalledWith(
+      'Bot identity: login=github-actions[bot] databaseId=41898282 source=fallback'
+    );
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+    debugSpy.mockRestore();
+  });
+
+  it('prefers GET /user over the Actions bot when the workflow token can call REST', async () => {
+    const token = 'ghp_same_as_workflow_env';
+    process.env.GITHUB_TOKEN = token;
+    graphql.mockRejectedValue(new Error('viewer down'));
+    getAuthenticated.mockResolvedValue({ data: { login: 'octocat', id: 7 } });
+
+    await expect(new GitHubService(token).getBotIdentity()).resolves.toEqual({
+      login: 'octocat',
+      id: 7,
+      source: 'rest',
+    });
+  });
+
+  it('does not assume github-actions[bot] for a GitHub App token when viewer and GET /user both fail', async () => {
     graphql.mockRejectedValue(Object.assign(new Error('nope'), { status: 403 }));
     getAuthenticated.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
     const warnSpy = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
     const debugSpy = jest.spyOn(require('@actions/core'), 'debug').mockImplementation(() => {});
 
-    const service = new GitHubService('ghs_app');
+    process.env.GITHUB_TOKEN = 'ghs_default_workflow_token';
+    const service = new GitHubService('ghs_app_installation_token');
     await expect(service.getBotLogin()).resolves.toBeNull();
     await expect(service.getBotIdentity()).resolves.toBeNull();
 
@@ -274,6 +331,17 @@ describe('GitHubService bot identity', () => {
     expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('not accessible'));
     warnSpy.mockRestore();
     debugSpy.mockRestore();
+  });
+
+  it('does not treat a same-length different token as the workflow GITHUB_TOKEN', async () => {
+    process.env.GITHUB_TOKEN = 'ghs_workflow_token_aaa';
+    graphql.mockRejectedValue(new Error('nope'));
+    getAuthenticated.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }));
+    const warnSpy = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
+
+    await expect(new GitHubService('ghs_workflow_token_bbb').getBotLogin()).resolves.toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not assuming github-actions[bot]'));
+    warnSpy.mockRestore();
   });
 
   it('warns without guessing a login when GET /user fails unexpectedly', async () => {

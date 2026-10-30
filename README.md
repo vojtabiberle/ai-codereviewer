@@ -55,6 +55,7 @@ See [agent setup runbook](docs/SETUP-FOR-AGENTS.md).
 | --- | --- | --- |
 | `GITHUB_TOKEN` | required | Token with contents read and pull requests write permissions. |
 | `REVIEWER_ID` | `${GITHUB_WORKFLOW}/${GITHUB_JOB}` | Identity stored in the hidden review marker. Distinguishes workflows that share one bot account. Not read from repository YAML. |
+| `IDENTITY_ONLY` | `false` | Log the bot identity and exit before a model call. Used by the manual bot-identity workflow. |
 | `AI_PROVIDER` | `openai` | `openai`, `anthropic`, `google`. |
 | `AI_API_KEY` | required | Key for the selected provider. |
 | `AI_MODEL` | required | Model identifier supported by the selected provider/account. |
@@ -118,6 +119,9 @@ commit; a changed head detected before publication causes failure instead of a
 stale approval. The published body ends with a hidden marker recording the
 reviewer id, head SHA, base SHA, and `status=complete` (or `status=degraded`
 when GitHub rejects comment locations and only the summary is published).
+A reviewer id that is one safe token (`CI/review`, `my-workflow/job`) is stored
+as written. Spaces and `--` are percent-encoded. The exact bytes are in
+[docs/ideas/001](docs/ideas/001-reviewed-commit-sha.md#review-marker-format).
 A push after the last check can still race publication, but the
 review remains attached to the older SHA. Enable stale-approval dismissal in
 branch protection if approvals are enabled.
@@ -172,6 +176,13 @@ yarn test:e2e <owner> <repo> <pr_number>
 
 **The live test posts a review to that PR and spends API credit.** Automatic approvals are disabled; blocker findings can still request changes. The script accepts both `INPUT_AI_*` and `AI_*` environment
 variables. `OPENAI_API_KEY` remains a fallback for the OpenAI API key.
+
+To check bot identity against api.github.com without a model key, open Actions →
+**Bot identity** → **Run workflow** on this repository. The log line is
+`Bot identity: login=… databaseId=… source=graphql|rest|fallback`. The default
+job uses `github.token`. The GitHub App job resolves `BOT_IDENTITY_APP_TOKEN`
+when that secret is set, and skips the check when it is absent. The workflow
+does not post a review.
 
 See [migration plan and compatibility notes](docs/MIGRATION.md).
 

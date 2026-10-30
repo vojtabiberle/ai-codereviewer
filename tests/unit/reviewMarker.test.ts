@@ -38,28 +38,43 @@ describe('resolveReviewerId', () => {
   });
 });
 
+const RAW_MARKER = `<!-- ai-codereviewer:review v=1 reviewer=CI/review sha=${SHA} base=${BASE} status=complete -->`;
+const SPACED_MARKER = `<!-- ai-codereviewer:review v=1 reviewer=Code%20Review%2Fjob sha=${SHA} base=${BASE} status=complete -->`;
+const DASHED_MARKER = `<!-- ai-codereviewer:review v=1 reviewer=foo%2D%2Dbar sha=${SHA} base=${BASE} status=complete -->`;
+
 describe('formatReviewMarker', () => {
-  it('writes a v=1 complete marker with safe tokens unencoded', () => {
-    expect(marker()).toBe(
-      `<!-- ai-codereviewer:review v=1 reviewer=CI/review sha=${SHA} base=${BASE} status=complete -->`
-    );
+  it('locks golden marker bytes for a raw reviewer id and round-trips', () => {
+    const text = marker({ reviewer: 'CI/review' });
+    expect(text).toBe(RAW_MARKER);
+    expect(parseReviewMarker(text)).toEqual({
+      version: 1,
+      reviewer: 'CI/review',
+      sha: SHA,
+      base: BASE,
+      status: 'complete',
+    });
+  });
+
+  it('locks golden marker bytes for a spaced reviewer id and round-trips', () => {
+    const text = marker({ reviewer: 'Code Review/job' });
+    expect(text).toBe(SPACED_MARKER);
+    expect(parseReviewMarker(text)?.reviewer).toBe('Code Review/job');
+    expect(parseReviewMarker(SPACED_MARKER)).toMatchObject({ reviewer: 'Code Review/job', status: 'complete' });
+  });
+
+  it('locks golden marker bytes for a double-hyphen reviewer id and round-trips', () => {
+    const text = marker({ reviewer: 'foo--bar' });
+    expect(text).toBe(DASHED_MARKER);
+    expect(text).not.toContain('foo--bar');
+    expect(parseReviewMarker(text)?.reviewer).toBe('foo--bar');
+    expect(parseReviewMarker(DASHED_MARKER)?.reviewer).toBe('foo--bar');
   });
 
   it('writes status=degraded and keeps a single hyphen', () => {
     const text = marker({ reviewer: 'my-workflow/job', status: 'degraded' });
-    expect(text).toContain('reviewer=my-workflow/job');
-    expect(text).toContain('status=degraded');
-  });
-
-  it('percent-encodes spaces and double hyphens', () => {
-    const spaced = marker({ reviewer: 'Code Review/job' });
-    expect(spaced).toContain('reviewer=Code%20Review%2Fjob');
-    expect(parseReviewMarker(spaced)?.reviewer).toBe('Code Review/job');
-
-    const dashed = marker({ reviewer: 'foo--bar' });
-    expect(dashed).toContain('reviewer=foo%2D%2Dbar');
-    expect(dashed).not.toContain('foo--bar');
-    expect(parseReviewMarker(dashed)?.reviewer).toBe('foo--bar');
+    expect(text).toBe(
+      `<!-- ai-codereviewer:review v=1 reviewer=my-workflow/job sha=${SHA} base=${BASE} status=degraded -->`
+    );
   });
 });
 
