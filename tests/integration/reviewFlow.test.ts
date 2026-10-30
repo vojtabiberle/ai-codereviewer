@@ -66,9 +66,12 @@ jest.mock('@octokit/rest', () => ({
     },
     users: {
       getAuthenticated: jest.fn().mockResolvedValue({
-        data: { login: 'github-actions[bot]' }
+        data: { login: 'github-actions[bot]', id: 41898282 }
       })
-    }
+    },
+    graphql: jest.fn().mockResolvedValue({
+      viewer: { login: 'github-actions[bot]', databaseId: 41898282 }
+    })
   }))
 }));
 

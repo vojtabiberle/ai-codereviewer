@@ -54,6 +54,7 @@ See [agent setup runbook](docs/SETUP-FOR-AGENTS.md).
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | required | Token with contents read and pull requests write permissions. |
+| `REVIEWER_ID` | `${GITHUB_WORKFLOW}/${GITHUB_JOB}` | Identity stored in the hidden review marker. Distinguishes workflows that share one bot account. Not read from repository YAML. |
 | `AI_PROVIDER` | `openai` | `openai`, `anthropic`, `google`. |
 | `AI_API_KEY` | required | Key for the selected provider. |
 | `AI_MODEL` | required | Model identifier supported by the selected provider/account. |
@@ -107,14 +108,17 @@ Workflow inputs set the trust and budget ceiling. Repository policy can disable
 approval or agentic mode, raise the approval threshold, and lower agentic budgets;
 it cannot enable those modes or raise budgets beyond the workflow values.
 Other recognized keys override the workflow baseline. API keys, endpoint URLs,
-shared-instruction credentials and `MAX_INPUT_BYTES` cannot be overridden in YAML.
+shared-instruction credentials, `MAX_INPUT_BYTES` and `REVIEWER_ID` cannot be overridden in YAML.
 
 Configuration, local instructions and project-context files come from the
 **base SHA**, so a PR cannot rewrite its own review policy. Policy changes take
 effect after merging. Context files, changed file contents, agentic reads and
 comparison endpoints use the **head SHA**. Reviews are explicitly attached to that
 commit; a changed head detected before publication causes failure instead of a
-stale approval. A push after the last check can still race publication, but the
+stale approval. The published body ends with a hidden marker recording the
+reviewer id, head SHA, base SHA, and `status=complete` (or `status=degraded`
+when GitHub rejects comment locations and only the summary is published).
+A push after the last check can still race publication, but the
 review remains attached to the older SHA. Enable stale-approval dismissal in
 branch protection if approvals are enabled.
 

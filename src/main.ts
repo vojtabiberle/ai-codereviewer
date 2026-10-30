@@ -4,6 +4,7 @@ import { AnthropicProvider } from './providers/AnthropicProvider';
 import { GeminiProvider } from './providers/GeminiProvider';
 import { ReviewService } from './services/ReviewService';
 import { GitHubService } from './services/GitHubService';
+import { resolveReviewerId } from './services/reviewMarker';
 import { DiffService } from './services/DiffService';
 import { readFileSync } from 'fs';
 
@@ -46,7 +47,9 @@ async function main() {
     });
 
     // Initialize services
-    const githubService = new GitHubService(githubToken);
+    const githubService = new GitHubService(githubToken, {
+      reviewerId: resolveReviewerId(core.getInput('REVIEWER_ID')),
+    });
     const diffService = new DiffService(githubToken, excludePatterns);
     const reviewService = new ReviewService(
       aiProvider,

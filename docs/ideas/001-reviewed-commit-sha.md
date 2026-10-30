@@ -1,7 +1,19 @@
 # Use the exact previously reviewed commit
 
-Status: idea — not approved for implementation.
+Status: step 1 implemented (bot identity and the hidden review marker). Baseline selection is not implemented.
 Priority: P0 (proposed).
+
+## Implementation progress
+
+Step 1 is implemented. Bot identity uses GraphQL `viewer { login databaseId }`,
+with REST `GET /user` only as a fallback. If both fail, the run warns and does
+not assume `github-actions[bot]`. Every published review body includes the hidden
+marker (`status=complete`, or `status=degraded` on the summary-only publish after
+a 422 for comment locations). `REVIEWER_ID` is an optional action input and is
+not read from repository YAML. A version-tolerant parser ignores unmarked
+reviews. Baseline selection, the compare-status check, and the full-review
+fallback are not implemented. History loading ([002](002-review-history-loading.md))
+is unchanged, aside from using the resolved login when it looks up this bot.
 
 ## Problem
 

@@ -46,6 +46,7 @@ const AnthropicProvider_1 = __nccwpck_require__(7773);
 const GeminiProvider_1 = __nccwpck_require__(5720);
 const ReviewService_1 = __nccwpck_require__(7053);
 const GitHubService_1 = __nccwpck_require__(7076);
+const reviewMarker_1 = __nccwpck_require__(761);
 const DiffService_1 = __nccwpck_require__(1676);
 const fs_1 = __nccwpck_require__(9896);
 async function main() {
@@ -84,7 +85,9 @@ async function main() {
             baseURL: baseURL || undefined,
         });
         // Initialize services
-        const githubService = new GitHubService_1.GitHubService(githubToken);
+        const githubService = new GitHubService_1.GitHubService(githubToken, {
+            reviewerId: (0, reviewMarker_1.resolveReviewerId)(core.getInput('REVIEWER_ID')),
+        });
         const diffService = new DiffService_1.DiffService(githubToken, excludePatterns);
         const reviewService = new ReviewService_1.ReviewService(aiProvider, githubService, diffService, {
             maxInputBytes: parseNumberInput('MAX_INPUT_BYTES', 1000000, 1, Number.MAX_SAFE_INTEGER, true),
@@ -1744,40 +1747,94 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.GitHubService = void 0;
 const rest_1 = __nccwpck_require__(5772);
 const core = __importStar(__nccwpck_require__(7484));
+const reviewMarker_1 = __nccwpck_require__(761);
+const VIEWER_QUERY = 'query { viewer { login databaseId } }';
 class GitHubService {
-    constructor(token) {
-        var _a;
+    constructor(token, options) {
+        var _a, _b;
         this.octokit = new rest_1.Octokit({ auth: token });
         [this.owner, this.repo] = ((_a = process.env.GITHUB_REPOSITORY) !== null && _a !== void 0 ? _a : '/').split('/');
+        const reviewerId = (_b = options === null || options === void 0 ? void 0 : options.reviewerId) === null || _b === void 0 ? void 0 : _b.trim();
+        this.reviewerIdOverride = reviewerId ? reviewerId : undefined;
+    }
+    /**
+     * Identity used to recognize this action's own reviews.
+     *
+     * Installation tokens (the default GITHUB_TOKEN and any other GitHub App
+     * token) cannot call GET /user. GraphQL `viewer` returns that app's bot
+     * login and database id for both of those, and for a PAT. GET /user is
+     * only the fallback. A total failure does not guess github-actions[bot]:
+     * that login is shared by every workflow and is the wrong app for any
+     * other installation token.
+     */
+    async getBotIdentity() {
+        if (!this.botIdentityPromise) {
+            this.botIdentityPromise = this.resolveBotIdentity();
+        }
+        return this.botIdentityPromise;
     }
     async getBotLogin() {
-        if (!this.botLoginPromise) {
-            this.botLoginPromise = (async () => {
-                try {
-                    const { data } = await this.octokit.users.getAuthenticated();
-                    core.debug(`Authenticated as: ${data.login}`);
-                    return data.login;
-                }
-                catch (error) {
-                    // 401/403/404 here is the expected response for a workflow's default
-                    // GITHUB_TOKEN — it's an integration credential, not a user, so
-                    // /user is not accessible. The 'github-actions[bot]' fallback IS
-                    // the correct identity for that case, so we don't want a warning.
-                    // For other errors (network, 5xx, etc.) something might actually be
-                    // wrong, so warn so it's visible in Actions logs.
-                    const status = error === null || error === void 0 ? void 0 : error.status;
-                    const expected = status === 401 || status === 403 || status === 404;
-                    if (expected) {
-                        core.debug(`/user not accessible (${status}); using github-actions[bot] as bot identity`);
-                    }
-                    else {
-                        core.warning(`Failed to resolve authenticated user, falling back to github-actions[bot]: ${error}`);
-                    }
-                    return 'github-actions[bot]';
-                }
-            })();
+        var _a, _b;
+        return (_b = (_a = (await this.getBotIdentity())) === null || _a === void 0 ? void 0 : _a.login) !== null && _b !== void 0 ? _b : null;
+    }
+    async resolveBotIdentity() {
+        const fromGraphql = await this.identityFromGraphql();
+        if (fromGraphql)
+            return fromGraphql;
+        const fromRest = await this.identityFromRest();
+        if (fromRest)
+            return fromRest;
+        core.warning('Failed to resolve bot identity; not assuming github-actions[bot]. Previous reviews by this action cannot be matched on this run.');
+        return null;
+    }
+    async identityFromGraphql() {
+        var _a;
+        try {
+            const result = await this.octokit.graphql(VIEWER_QUERY);
+            const viewer = result === null || result === void 0 ? void 0 : result.viewer;
+            const login = (_a = viewer === null || viewer === void 0 ? void 0 : viewer.login) === null || _a === void 0 ? void 0 : _a.trim();
+            if (!login) {
+                core.debug('GraphQL viewer returned no login; trying GET /user');
+                return null;
+            }
+            const id = normalizeDatabaseId(viewer === null || viewer === void 0 ? void 0 : viewer.databaseId);
+            core.debug(`Resolved bot identity via GraphQL viewer: login=${login} id=${id !== null && id !== void 0 ? id : 'unknown'}`);
+            if (id === null) {
+                core.debug('GraphQL viewer returned a login without databaseId');
+            }
+            return { login, id };
         }
-        return this.botLoginPromise;
+        catch (error) {
+            core.debug(`GraphQL viewer failed (${formatError(error)}); trying GET /user`);
+            return null;
+        }
+    }
+    async identityFromRest() {
+        var _a;
+        try {
+            const { data } = await this.octokit.users.getAuthenticated();
+            const login = (_a = data.login) === null || _a === void 0 ? void 0 : _a.trim();
+            if (!login) {
+                core.debug('GET /user returned no login');
+                return null;
+            }
+            const id = typeof data.id === 'number' ? data.id : null;
+            core.debug(`Resolved bot identity via GET /user: login=${login} id=${id !== null && id !== void 0 ? id : 'unknown'}`);
+            return { login, id };
+        }
+        catch (error) {
+            const status = httpStatus(error);
+            if (status === 401 || status === 403 || status === 404) {
+                core.debug(`GET /user not accessible (${status}); expected for an installation token when GraphQL viewer also failed`);
+            }
+            else {
+                core.debug(`GET /user failed (${formatError(error)})`);
+            }
+            return null;
+        }
+    }
+    currentReviewerId() {
+        return (0, reviewMarker_1.resolveReviewerId)(this.reviewerIdOverride);
     }
     async getPRDetails(prNumber) {
         var _a;
@@ -1821,12 +1878,9 @@ class GitHubService {
     }
     async submitReview(prNumber, review, validRightLinesByPath, commitId) {
         var _a, _b;
-        const assertCurrentHead = async () => {
-            if (!commitId || (await this.getPRDetails(prNumber)).head !== commitId) {
-                throw new Error('PR head changed during review; refusing to publish a stale review. Re-run on the new commit.');
-            }
-        };
-        await assertCurrentHead();
+        const reviewer = this.currentReviewerId();
+        const markedBody = (body, status, base) => (0, reviewMarker_1.withReviewMarker)(body, { reviewer, sha: commitId, base, status });
+        const pr = await this.assertCurrentHead(prNumber, commitId);
         const { summary, lineComments = [], suggestedAction } = review;
         const { kept, dropped } = this.partitionComments(lineComments, validRightLinesByPath);
         if (dropped.length > 0) {
@@ -1841,13 +1895,14 @@ class GitHubService {
         }));
         core.info(`Submitting review with ${comments.length} comments`);
         core.debug(`Review comments: ${JSON.stringify(comments, null, 2)}`);
+        core.debug(`Review marker reviewer=${reviewer} sha=${commitId} base=${pr.base} status=complete`);
         const event = suggestedAction.toUpperCase();
         const params = {
             owner: this.owner,
             repo: this.repo,
             pull_number: prNumber,
             commit_id: commitId,
-            body: summary,
+            body: markedBody(summary, 'complete', pr.base),
             comments,
             event,
         };
@@ -1862,14 +1917,22 @@ class GitHubService {
                 errors.some(item => { var _a; return ['line', 'position', 'path'].includes((_a = item === null || item === void 0 ? void 0 : item.field) !== null && _a !== void 0 ? _a : ''); });
             if (!invalidLine)
                 throw error;
-            await assertCurrentHead();
+            const current = await this.assertCurrentHead(prNumber, commitId);
             core.warning('GitHub rejected comment locations; submitting the summary on the reviewed commit.');
+            core.debug(`Review marker reviewer=${reviewer} sha=${commitId} base=${current.base} status=degraded`);
             await this.octokit.pulls.createReview({
                 ...params,
-                body: `${summary}\n\n> Note: Line comments were omitted because GitHub rejected their locations.`,
+                body: markedBody(`${summary}\n\n> Note: Line comments were omitted because GitHub rejected their locations.`, 'degraded', current.base),
                 comments: [],
             });
         }
+    }
+    async assertCurrentHead(prNumber, commitId) {
+        const pr = await this.getPRDetails(prNumber);
+        if (!commitId || pr.head !== commitId) {
+            throw new Error('PR head changed during review; refusing to publish a stale review. Re-run on the new commit.');
+        }
+        return pr;
     }
     partitionComments(lineComments = [], validRightLinesByPath) {
         if (!validRightLinesByPath) {
@@ -1890,6 +1953,8 @@ class GitHubService {
     }
     async getLastReviewSubmittedAt(prNumber) {
         const botLogin = await this.getBotLogin();
+        if (!botLogin)
+            return null;
         // Get the first page to check pagination info
         const firstResponse = await this.octokit.pulls.listReviews({
             owner: this.owner,
@@ -1962,6 +2027,11 @@ class GitHubService {
     }
     async getPreviousReviews(prNumber) {
         var _a;
+        const botLogin = await this.getBotLogin();
+        if (!botLogin) {
+            core.debug('Bot identity is unresolved; skipping previous-review attribution');
+            return [];
+        }
         let allReviews = [];
         let page = 1;
         let hasNextPage = true;
@@ -1981,7 +2051,6 @@ class GitHubService {
             page++;
         }
         // Filter to bot reviews
-        const botLogin = await this.getBotLogin();
         const botReviews = allReviews.filter(review => { var _a; return ((_a = review.user) === null || _a === void 0 ? void 0 : _a.login) === botLogin; });
         core.debug(`Found ${botReviews.length} bot reviews`);
         const botReviewsWithComments = await Promise.all(botReviews.map(async (review) => {
@@ -2020,6 +2089,18 @@ class GitHubService {
     }
 }
 exports.GitHubService = GitHubService;
+function normalizeDatabaseId(value) {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+function httpStatus(error) {
+    const status = error === null || error === void 0 ? void 0 : error.status;
+    return typeof status === 'number' ? status : undefined;
+}
+function formatError(error) {
+    const status = httpStatus(error);
+    const message = error instanceof Error ? error.message : String(error);
+    return status ? `${status} ${message}` : message;
+}
 
 
 /***/ }),
@@ -2609,6 +2690,132 @@ class ReviewService {
     }
 }
 exports.ReviewService = ReviewService;
+
+
+/***/ }),
+
+/***/ 761:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * Hidden marker stored on reviews this action publishes.
+ *
+ * `<!-- ai-codereviewer:review v=1 reviewer=<id> sha=<head> base=<sha> status=complete -->`
+ *
+ * Values that are a single safe token are written as-is. Anything else
+ * (spaces, `--`, which cannot appear inside an HTML comment) is percent-encoded.
+ * The parser accepts that encoding and double-quoted values, ignores unknown
+ * attributes, and accepts any marker version >= 1 that still carries the
+ * known fields. Reviews with no valid marker parse as null.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FALLBACK_REVIEWER_ID = void 0;
+exports.resolveReviewerId = resolveReviewerId;
+exports.formatReviewMarker = formatReviewMarker;
+exports.withReviewMarker = withReviewMarker;
+exports.stripReviewMarkers = stripReviewMarkers;
+exports.parseReviewMarker = parseReviewMarker;
+exports.FALLBACK_REVIEWER_ID = 'ai-codereviewer';
+const SAFE_MARKER_VALUE = /^[A-Za-z0-9._/@+:-]+$/;
+const MARKER_PATTERN = /<!--\s*ai-codereviewer:review\b([\s\S]*?)-->/g;
+const ATTR_PATTERN = /([A-Za-z_][A-Za-z0-9_]*)=(?:"((?:\\.|[^"\\])*)"|([^\s"<=>]+))/g;
+const COMMIT_SHA = /^[0-9a-fA-F]{7,64}$/;
+const STATUS_TOKEN = /^[a-z][a-z0-9_-]*$/;
+function resolveReviewerId(explicit, env = process.env) {
+    var _a, _b, _c, _d;
+    const trimmed = explicit === null || explicit === void 0 ? void 0 : explicit.trim();
+    if (trimmed)
+        return trimmed;
+    const workflow = (_b = (_a = env.GITHUB_WORKFLOW) === null || _a === void 0 ? void 0 : _a.trim()) !== null && _b !== void 0 ? _b : '';
+    const job = (_d = (_c = env.GITHUB_JOB) === null || _c === void 0 ? void 0 : _c.trim()) !== null && _d !== void 0 ? _d : '';
+    if (workflow && job)
+        return `${workflow}/${job}`;
+    return exports.FALLBACK_REVIEWER_ID;
+}
+function formatReviewMarker(fields) {
+    var _a;
+    const version = (_a = fields.version) !== null && _a !== void 0 ? _a : 1;
+    const parts = [
+        `v=${version}`,
+        `reviewer=${encodeMarkerValue(fields.reviewer)}`,
+        `sha=${encodeMarkerValue(fields.sha)}`,
+        `base=${encodeMarkerValue(fields.base)}`,
+        `status=${encodeMarkerValue(fields.status)}`,
+    ];
+    return `<!-- ai-codereviewer:review ${parts.join(' ')} -->`;
+}
+function withReviewMarker(body, fields) {
+    const stripped = stripReviewMarkers(body).trimEnd();
+    const marker = formatReviewMarker(fields);
+    return stripped.length > 0 ? `${stripped}\n\n${marker}` : marker;
+}
+function stripReviewMarkers(body) {
+    return body.replace(new RegExp(MARKER_PATTERN.source, 'g'), '');
+}
+/**
+ * Returns the last valid marker in `body`. Unmarked and malformed comments
+ * are ignored. The last marker wins so a marker this action appends at
+ * publish time overrides one copied into the summary.
+ */
+function parseReviewMarker(body) {
+    var _a;
+    if (!body)
+        return null;
+    let found = null;
+    for (const match of body.matchAll(new RegExp(MARKER_PATTERN.source, 'g'))) {
+        const parsed = parseMarkerContents((_a = match[1]) !== null && _a !== void 0 ? _a : '');
+        if (parsed)
+            found = parsed;
+    }
+    return found;
+}
+function encodeMarkerValue(value) {
+    if (SAFE_MARKER_VALUE.test(value) && !value.includes('--'))
+        return value;
+    return encodeURIComponent(value).replace(/-/g, '%2D');
+}
+function decodeMarkerValue(value) {
+    if (!value.includes('%'))
+        return value;
+    try {
+        return decodeURIComponent(value);
+    }
+    catch {
+        return value;
+    }
+}
+function unescapeQuoted(value) {
+    return value.replace(/\\(.)/g, '$1');
+}
+function parseAttributes(source) {
+    const attrs = {};
+    for (const match of source.matchAll(new RegExp(ATTR_PATTERN.source, 'g'))) {
+        const key = match[1];
+        const raw = match[2] !== undefined ? unescapeQuoted(match[2]) : match[3];
+        attrs[key] = decodeMarkerValue(raw);
+    }
+    return attrs;
+}
+function parseMarkerContents(source) {
+    var _a, _b, _c, _d;
+    const attrs = parseAttributes(source);
+    const version = Number(attrs.v);
+    if (!Number.isInteger(version) || version < 1)
+        return null;
+    const reviewer = (_a = attrs.reviewer) !== null && _a !== void 0 ? _a : '';
+    const sha = (_b = attrs.sha) !== null && _b !== void 0 ? _b : '';
+    const base = (_c = attrs.base) !== null && _c !== void 0 ? _c : '';
+    const status = (_d = attrs.status) !== null && _d !== void 0 ? _d : '';
+    if (!isReviewer(reviewer) || !COMMIT_SHA.test(sha) || !COMMIT_SHA.test(base) || !STATUS_TOKEN.test(status)) {
+        return null;
+    }
+    return { version, reviewer, sha, base, status };
+}
+function isReviewer(value) {
+    return value.trim().length > 0 && !value.includes('-->') && !/[\r\n]/.test(value);
+}
 
 
 /***/ }),
