@@ -21,6 +21,16 @@ describe('buildSystemPrompt', () => {
     expect(prompt).not.toContain('Repository-specific reviewer instructions');
   });
 
+  it('explains a null previous-comment line when history is present', () => {
+    const prompt = buildSystemPrompt({
+      ...makeRequest(),
+      previousReviews: [{ lineComments: [{ path: 'a.ts', line: null, outdated: true, comment: 'old' }] }],
+    });
+    expect(prompt).toContain('outdated');
+    expect(prompt).toContain('line 0');
+    expect(prompt).not.toContain('When reviewing updates');
+  });
+
   it('appends update guidance when isUpdate is true', () => {
     const prompt = buildSystemPrompt(makeRequest({ isUpdate: true }));
     expect(prompt).toContain('When reviewing updates');

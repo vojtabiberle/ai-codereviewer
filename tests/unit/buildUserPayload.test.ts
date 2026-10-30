@@ -47,18 +47,35 @@ describe('buildUserPayload', () => {
     });
   });
 
-  it('slims previousReviews to (path, line, comment)', () => {
+  it('keeps a null line and renders outdated comments with their replies', () => {
     const out = JSON.parse(buildUserPayload(makeRequest({
       previousReviews: [
         {
-          commit: 'abc',
           summary: 'sum',
-          lineComments: [{ path: 'a.ts', line: 1, comment: 'c', resolved: true }],
+          lineComments: [{
+            path: 'a.ts',
+            line: null,
+            outdated: true,
+            originalLine: 12,
+            comment: 'stale',
+            replies: [{ author: 'octocat', comment: 'ack' }],
+          }],
         },
       ],
     })));
     expect(out.previousReviews).toEqual([
-      { summary: 'sum', lineComments: [{ path: 'a.ts', line: 1, comment: 'c' }] },
+      {
+        summary: 'sum',
+        lineComments: [{
+          path: 'a.ts',
+          line: null,
+          outdated: true,
+          originalLine: 12,
+          comment: 'stale',
+          replies: [{ author: 'octocat', comment: 'ack' }],
+        }],
+      },
     ]);
+    expect(JSON.stringify(out.previousReviews)).not.toContain('"line":0');
   });
 });

@@ -1,7 +1,25 @@
 # Load previous review comments once
 
-Status: idea — not approved for implementation.
+Status: implemented for REST history loading. GraphQL thread resolution stays in [004](004-existing-threads.md), [005](005-human-resolution.md) and [006](006-fix-verification.md).
 Priority: P0 (proposed).
+
+## Implementation record
+
+One page walk of `pulls.listReviews` (every page) and one page walk of `pulls.listReviewComments` (at most 20 pages of 100, then `core.warning`). Comments are grouped by `pull_request_review_id`. `review_id` is not sent. The comment listing is skipped when this action has no reviews on the pull request.
+
+Reviews match `user.id` when `getBotIdentity()` has a numeric id and the review user has an id; otherwise they match login. A valid marker whose `reviewer` is not this action's reviewer id excludes that review. Unmarked bot reviews stay in history. Markers on human reviews do not attribute those reviews.
+
+`line: null` stays null and sets `outdated`. The dedup key is `path`, then `line ?? original_line` (`null` is never stored as `0`), then the normalized body. The outdated flag is stored and rendered. It is not part of the key, so a repeated finding at that line still matches.
+
+`HISTORY_MAX_BYTES` is a workflow input, default `120000` (12% of the default `MAX_INPUT_BYTES` of `1000000`). It is not read from repository YAML. The enforced budget is `min(HISTORY_MAX_BYTES, MAX_INPUT_BYTES)`. The prompt is filled newest-first within each tier, skipping an item that does not fit:
+
+1. Non-outdated bot findings on files in the current diff, with replies.
+2. Other non-outdated bot findings, with replies.
+3. Summaries of the two newest bot reviews, with the hidden marker removed.
+4. Summaries of older bot reviews.
+5. Outdated bot findings, newest first, so the oldest are dropped first.
+
+Resolution is unknown until a thread query exists, so "unresolved" means not outdated (`line !== null`). Replies whose author is not this bot are abbreviated to 160 characters in the prompt. The full text stays in memory. Dedup uses every loaded finding, including ones left out of the prompt. Pagination is an explicit page/link loop over those two REST endpoints.
 
 ## Problem
 

@@ -27,6 +27,8 @@ Enable `AGENTIC_REVIEW: 'true'` in the trusted workflow. Start with defaults:
 Repository YAML may lower those caps, but cannot raise them or enable the mode
 when disabled by the workflow. Initial prompt and user payload are capped at
 1,000,000 bytes by `MAX_INPUT_BYTES` independently of the read budget.
+Previous-review text inside that payload is capped again by `HISTORY_MAX_BYTES`
+(default 120,000). A long discussion is truncated instead of failing the review.
 
 Model output and repeated context can still be costly. Set provider spending
 limits; byte budgets are not a hard currency cap.

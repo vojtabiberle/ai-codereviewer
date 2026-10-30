@@ -5,8 +5,9 @@ includes a problem, proposal, acceptance criteria and the questions to settle
 before implementation. [001](001-reviewed-commit-sha.md) and [002](002-review-history-loading.md)
 record settled answers; the others still have open questions.
 [001](001-reviewed-commit-sha.md) step 1 (bot identity and the hidden review marker)
-is implemented. The rest of this backlog, including the remainder of 001 and all
-of 002, is not.
+is implemented. [002](002-review-history-loading.md) (one REST load of review
+history, the comment page cap, and `HISTORY_MAX_BYTES`) is implemented.
+The rest of this backlog, including baseline selection in 001, is not.
 
 Proposed priorities: P0 correctness prerequisites; P1 comment lifecycle and shared
 foundations; P2 user controls, provider integrations and evaluation; P3 later,
@@ -35,10 +36,10 @@ need-driven extensions. Priority does not automatically authorize implementation
 ## Suggested sequence
 
 1. Correct previous-review identity and history loading (001–002).
-   Done: resolve the bot identity and write the review marker.
-   Still to do: load history once over REST (002); select the baseline from `commit_id`
-   and compare status, with a full-review fallback (001); take valid comment
-   lines from the pull request diff.
+   Done: resolve the bot identity and write the review marker. Load history once
+   over REST (002).
+   Still to do: select the baseline from `commit_id` and compare status, with a
+   full-review fallback (001); take valid comment lines from the pull request diff.
 2. Define stable finding identity (003) and publication idempotency (008).
 3. Continue existing threads, respect human resolution and maintain one summary
    (004–005, 007). Fix verification/auto-resolution is a separate opt-in design (006).
