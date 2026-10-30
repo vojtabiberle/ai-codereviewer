@@ -66,6 +66,7 @@ async function main() {
       diffService,
       {
         maxInputBytes: parseNumberInput('MAX_INPUT_BYTES', 1_000_000, 1, Number.MAX_SAFE_INTEGER, true),
+        historyMaxBytes: parseNumberInput('HISTORY_MAX_BYTES', 120_000, 0, Number.MAX_SAFE_INTEGER, true),
         maxComments,
         approveReviews,
         approveConfidenceThreshold,

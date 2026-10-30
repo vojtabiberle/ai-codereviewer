@@ -1,3 +1,5 @@
+import type { PromptReview } from '../services/reviewHistory';
+
 export interface AIProviderConfig {
   apiKey: string;
   model: string;
@@ -16,16 +18,8 @@ export interface ReviewRequest {
     path: string;
     content: string;
   }>;
-  previousReviews?: Array<{
-    commit: string | null;
-    summary: string;
-    lineComments: Array<{
-      path: string;
-      line: number;
-      comment: string;
-      resolved?: boolean;
-    }>;
-  }>;
+  /** Prompt-sized history. Findings omitted here are still used for deduplication. */
+  previousReviews?: PromptReview[];
   pullRequest: {
     title: string;
     description: string;

@@ -14,9 +14,9 @@ import { ReviewRequest } from '../providers/AIProvider';
  *                   here — it's already in the system prompt where it
  *                   gets cached. Keeping it here too would double-count
  *                   tokens and bypass caching.)
- *   - previousReviews: prior bot comments, slimmed down to (path, line,
- *                   comment, summary). The full review object has more
- *                   fields the model doesn't need.
+ *   - previousReviews: history already trimmed to the prompt budget.
+ *                   A null line is left null and paired with outdated: true.
+ *                   Replies from other authors are already abbreviated.
  */
 export function buildUserPayload(request: ReviewRequest): string {
   const { repoInstructions: _omit, ...contextSansInstructions } = request.context;
@@ -27,13 +27,6 @@ export function buildUserPayload(request: ReviewRequest): string {
     contextFiles: request.contextFiles,
     pr: request.pullRequest,
     context: contextSansInstructions,
-    previousReviews: request.previousReviews?.map(review => ({
-      summary: review.summary,
-      lineComments: review.lineComments.map(c => ({
-        path: c.path,
-        line: c.line,
-        comment: c.comment,
-      })),
-    })),
+    previousReviews: request.previousReviews,
   });
 }

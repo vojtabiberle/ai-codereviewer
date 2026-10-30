@@ -74,6 +74,7 @@ See [agent setup runbook](docs/SETUP-FOR-AGENTS.md).
 | `CONTEXT_FILES` | empty | Comma-separated paths attached from the reviewed head SHA. |
 | `CONFIG_FILE` | `.github/ai-review.yml` | YAML configuration read from the PR base commit. |
 | `MAX_INPUT_BYTES` | `1000000` | UTF-8 cap on initial system prompt plus serialized user payload. Oversized reviews fail before a model call. |
+| `HISTORY_MAX_BYTES` | `120000` | UTF-8 cap for previous-review history inside the user payload (12% of the default `MAX_INPUT_BYTES`). Longer discussions are truncated. Not read from repository YAML. |
 | `AGENTIC_REVIEW` | `false` | Allow the model to call `read_file` and `submit_review`. |
 | `AGENTIC_MAX_FILES` | `20` | Maximum distinct `(path, range)` read attempts, including missing files. |
 | `AGENTIC_MAX_BYTES_PER_FILE` | `20000` | Maximum UTF-8 output bytes per read, including a truncation marker. |
@@ -109,7 +110,7 @@ Workflow inputs set the trust and budget ceiling. Repository policy can disable
 approval or agentic mode, raise the approval threshold, and lower agentic budgets;
 it cannot enable those modes or raise budgets beyond the workflow values.
 Other recognized keys override the workflow baseline. API keys, endpoint URLs,
-shared-instruction credentials, `MAX_INPUT_BYTES` and `REVIEWER_ID` cannot be overridden in YAML.
+shared-instruction credentials, `MAX_INPUT_BYTES`, `HISTORY_MAX_BYTES` and `REVIEWER_ID` cannot be overridden in YAML.
 
 Configuration, local instructions and project-context files come from the
 **base SHA**, so a PR cannot rewrite its own review policy. Policy changes take
@@ -125,6 +126,35 @@ as written. Spaces and `--` are percent-encoded. The exact bytes are in
 A push after the last check can still race publication, but the
 review remains attached to the older SHA. Enable stale-approval dismissal in
 branch protection if approvals are enabled.
+
+### Previous review history
+
+History loads whenever this bot has earlier reviews on the pull request.
+Matching prefers the numeric user id from the identity lookup and falls back
+to login. An unmarked review by that bot still counts. A review whose hidden
+marker names a different `reviewer` is another workflow and is left out.
+Markers on human reviews are ignored. Human comments are not stored as this
+action's findings.
+
+Review comments are fetched once, not once per review, because
+`GET /pulls/{n}/comments` ignores `review_id`. At most 20 pages of 100 comments
+are loaded. Passing that cap logs a warning and deduplication uses the comments
+that were loaded. Every review page is still read.
+
+The model sees at most `HISTORY_MAX_BYTES` of that history (default `120000`;
+the enforced budget is also capped by `MAX_INPUT_BYTES`). Fill order, newest
+first within each tier, skipping an item that does not fit:
+
+1. Current bot comments on files in this diff, including replies.
+2. Other current bot comments, including replies.
+3. Summaries of the two newest bot reviews.
+4. Summaries of older bot reviews.
+5. Outdated comments (`"line": null`), newest first, so the oldest are dropped first.
+
+Replies from other people are shortened to 160 characters. A null `line` stays
+null and is marked outdated; it is not stored as line 0. Deduplication still
+uses every loaded bot finding, including comments omitted from the prompt, so
+a long discussion does not by itself trip `MAX_INPUT_BYTES`.
 
 ### Instructions and agentic review
 

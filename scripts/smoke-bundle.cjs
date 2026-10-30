@@ -12,6 +12,7 @@ const cases = [
   ['AGENTIC_MAX_FILES', '2junk', /AGENTIC_MAX_FILES must be a positive integer/],
   ['AGENTIC_MAX_TOTAL_BYTES', '-1', /AGENTIC_MAX_TOTAL_BYTES must be a positive integer/],
   ['MAX_INPUT_BYTES', '0', /MAX_INPUT_BYTES must be/],
+  ['HISTORY_MAX_BYTES', '-1', /HISTORY_MAX_BYTES must be/],
 ];
 
 for (const [input, value, expected] of cases) {

@@ -3,6 +3,15 @@ import { Octokit } from '@octokit/rest';
 import * as core from '@actions/core';
 import { ReviewResponse } from '../providers/AIProvider';
 import { resolveReviewerId, withReviewMarker } from './reviewMarker';
+import {
+  groupReviewHistory,
+  HISTORY_PAGE_SIZE,
+  HistoryReview,
+  ListedComment,
+  ListedReview,
+  REVIEW_COMMENT_PAGE_CAP,
+  reviewBelongsToThisAction,
+} from './reviewHistory';
 
 export interface PRDetails {
   owner: string;
@@ -385,88 +394,84 @@ export class GitHubService {
     return lastCommit?.sha || null;
   }
 
-  async getPreviousReviews(prNumber: number): Promise<Array<{
-    commit: string | null;
-    summary: string;
-    lineComments: Array<{
-      path: string;
-      line: number;
-      comment: string;
-    }>;
-  }>> {
-    const botLogin = await this.getBotLogin();
-    if (!botLogin) {
+  /**
+   * Reviews by this action, with comments grouped from one pull-request-wide
+   * listing. `GET /pulls/{n}/comments` ignores `review_id`, so comments are
+   * not fetched per review.
+   */
+  async getPreviousReviews(prNumber: number): Promise<HistoryReview[]> {
+    const identity = await this.getBotIdentity();
+    if (!identity) {
       core.debug('Bot identity is unresolved; skipping previous-review attribution');
       return [];
     }
 
-    let allReviews = [];
-    let page = 1;
-    let hasNextPage = true;
-
-    // Fetch all reviews with pagination
-    while (hasNextPage) {
-      const response = await this.octokit.pulls.listReviews({
+    const rawReviews = await this.eachPage<ListedReview>(page =>
+      this.octokit.pulls.listReviews({
         owner: this.owner,
         repo: this.repo,
         pull_number: prNumber,
-        per_page: 100,
+        per_page: HISTORY_PAGE_SIZE,
         page,
-      });
-
-      allReviews.push(...response.data);
-
-      // Check if there's a next page
-      const linkHeader = response.headers.link;
-      hasNextPage = linkHeader?.includes('rel="next"') ?? false;
-      page++;
-    }
-
-    // Filter to bot reviews
-    const botReviews = allReviews.filter(review => review.user?.login === botLogin);
-    core.debug(`Found ${botReviews.length} bot reviews`);
-
-    const botReviewsWithComments = await Promise.all(
-      botReviews.map(async review => {
-        let allComments = [];
-        let commentPage = 1;
-        let hasNextCommentPage = true;
-
-        // Fetch all comments for each review with pagination
-        while (hasNextCommentPage) {
-          const commentsResponse = await this.octokit.pulls.listReviewComments({
-            owner: this.owner,
-            repo: this.repo,
-            pull_number: prNumber,
-            review_id: review.id,
-            per_page: 100,
-            page: commentPage,
-          });
-
-          allComments.push(...commentsResponse.data);
-
-          // Check if there's a next page of comments
-          const commentLinkHeader = commentsResponse.headers.link;
-          hasNextCommentPage = commentLinkHeader?.includes('rel="next"') ?? false;
-          commentPage++;
-        }
-
-        core.debug(`Found ${allComments.length} comments for review ID ${review.id}`);
-
-        return {
-          commit: review.commit_id,
-          summary: review.body || '',
-          lineComments: allComments.map(comment => ({
-            path: comment.path,
-            line: comment.line || 0,
-            comment: comment.body
-          }))
-        };
       })
     );
 
-    return botReviewsWithComments;
+    const reviewerId = this.currentReviewerId();
+    const ours = rawReviews.filter(review => reviewBelongsToThisAction(review, identity, reviewerId));
+    core.debug(`Found ${ours.length} reviews by this action (${rawReviews.length} total)`);
+    if (ours.length === 0) return [];
+
+    const rawComments = await this.eachPage<ListedComment>(
+      page => this.octokit.pulls.listReviewComments({
+        owner: this.owner,
+        repo: this.repo,
+        pull_number: prNumber,
+        per_page: HISTORY_PAGE_SIZE,
+        page,
+      }),
+      {
+        cap: REVIEW_COMMENT_PAGE_CAP,
+        onCap: loaded => {
+          core.warning(
+            `Stopped loading pull request review comments after ${REVIEW_COMMENT_PAGE_CAP} pages of ${HISTORY_PAGE_SIZE} (${loaded} comments). Deduplicating from the comments that were loaded.`
+          );
+        },
+      }
+    );
+
+    const grouped = groupReviewHistory(ours, rawComments, identity);
+    core.debug(`Grouped ${rawComments.length} review comments onto ${grouped.length} previous reviews`);
+    return grouped;
   }
+
+  /**
+   * Follow `rel="next"` page by page. `cap` stops after that many pages when
+   * another page exists; a list that ends on the cap page is complete.
+   */
+  private async eachPage<T>(
+    fetchPage: (page: number) => Promise<{ data: readonly T[]; headers?: { link?: unknown } }>,
+    options?: { cap?: number; onCap?: (loaded: number) => void }
+  ): Promise<T[]> {
+    const loaded: T[] = [];
+    let page = 1;
+    for (;;) {
+      const response = await fetchPage(page);
+      loaded.push(...response.data);
+      const hasNext = linkHeader(response.headers?.link).includes('rel="next"');
+      if (!hasNext) return loaded;
+      if (options?.cap !== undefined && page >= options.cap) {
+        options.onCap?.(loaded.length);
+        return loaded;
+      }
+      page += 1;
+    }
+  }
+}
+
+function linkHeader(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.filter(item => typeof item === 'string').join(',');
+  return '';
 }
 
 /**
