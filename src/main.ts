@@ -4,11 +4,21 @@ import { AnthropicProvider } from './providers/AnthropicProvider';
 import { GeminiProvider } from './providers/GeminiProvider';
 import { ReviewService } from './services/ReviewService';
 import { GitHubService } from './services/GitHubService';
+import { resolveReviewerId } from './services/reviewMarker';
 import { DiffService } from './services/DiffService';
 import { readFileSync } from 'fs';
 
 async function main() {
   try {
+    if (isIdentityOnly()) {
+      const githubToken = core.getInput('GITHUB_TOKEN', { required: true });
+      const identity = await new GitHubService(githubToken).getBotIdentity();
+      if (!identity) {
+        throw new Error('Bot identity could not be resolved');
+      }
+      return;
+    }
+
     // Get inputs
     const provider = core.getInput('AI_PROVIDER');
     const model = core.getInput('AI_MODEL', { required: true });
@@ -46,7 +56,9 @@ async function main() {
     });
 
     // Initialize services
-    const githubService = new GitHubService(githubToken);
+    const githubService = new GitHubService(githubToken, {
+      reviewerId: resolveReviewerId(core.getInput('REVIEWER_ID')),
+    });
     const diffService = new DiffService(githubToken, excludePatterns);
     const reviewService = new ReviewService(
       aiProvider,
@@ -83,6 +95,13 @@ async function main() {
   } catch (error: unknown) {
     core.setFailed(`Action failed: ${(error as Error).message}`);
   }
+}
+
+function isIdentityOnly(): boolean {
+  const raw = core.getInput('IDENTITY_ONLY').trim().toLowerCase();
+  if (!raw || raw === 'false') return false;
+  if (raw === 'true') return true;
+  throw new Error(`IDENTITY_ONLY must be true or false; got '${raw}'`);
 }
 
 const VALID_PROVIDERS = ['openai', 'anthropic', 'google'] as const;

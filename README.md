@@ -54,6 +54,8 @@ See [agent setup runbook](docs/SETUP-FOR-AGENTS.md).
 | Input | Default | Meaning |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | required | Token with contents read and pull requests write permissions. |
+| `REVIEWER_ID` | `${GITHUB_WORKFLOW}/${GITHUB_JOB}` | Identity stored in the hidden review marker. Distinguishes workflows that share one bot account. Not read from repository YAML. |
+| `IDENTITY_ONLY` | `false` | Log the bot identity and exit before a model call. Used by the manual bot-identity workflow. |
 | `AI_PROVIDER` | `openai` | `openai`, `anthropic`, `google`. |
 | `AI_API_KEY` | required | Key for the selected provider. |
 | `AI_MODEL` | required | Model identifier supported by the selected provider/account. |
@@ -107,14 +109,20 @@ Workflow inputs set the trust and budget ceiling. Repository policy can disable
 approval or agentic mode, raise the approval threshold, and lower agentic budgets;
 it cannot enable those modes or raise budgets beyond the workflow values.
 Other recognized keys override the workflow baseline. API keys, endpoint URLs,
-shared-instruction credentials and `MAX_INPUT_BYTES` cannot be overridden in YAML.
+shared-instruction credentials, `MAX_INPUT_BYTES` and `REVIEWER_ID` cannot be overridden in YAML.
 
 Configuration, local instructions and project-context files come from the
 **base SHA**, so a PR cannot rewrite its own review policy. Policy changes take
 effect after merging. Context files, changed file contents, agentic reads and
 comparison endpoints use the **head SHA**. Reviews are explicitly attached to that
 commit; a changed head detected before publication causes failure instead of a
-stale approval. A push after the last check can still race publication, but the
+stale approval. The published body ends with a hidden marker recording the
+reviewer id, head SHA, base SHA, and `status=complete` (or `status=degraded`
+when GitHub rejects comment locations and only the summary is published).
+A reviewer id that is one safe token (`CI/review`, `my-workflow/job`) is stored
+as written. Spaces and `--` are percent-encoded. The exact bytes are in
+[docs/ideas/001](docs/ideas/001-reviewed-commit-sha.md#review-marker-format).
+A push after the last check can still race publication, but the
 review remains attached to the older SHA. Enable stale-approval dismissal in
 branch protection if approvals are enabled.
 
@@ -168,6 +176,15 @@ yarn test:e2e <owner> <repo> <pr_number>
 
 **The live test posts a review to that PR and spends API credit.** Automatic approvals are disabled; blocker findings can still request changes. The script accepts both `INPUT_AI_*` and `AI_*` environment
 variables. `OPENAI_API_KEY` remains a fallback for the OpenAI API key.
+
+Pull requests that change `src/`, `dist/`, `action.yml`, or the bot-identity
+workflow run that check with the default `GITHUB_TOKEN`. It does not post a
+review. After the workflow file is on the default branch, Actions → **Bot
+identity** → **Run workflow** runs the same check. The log line is
+`Bot identity: login=… databaseId=… source=graphql|rest|fallback`. The GitHub
+App job uses `BOT_IDENTITY_APP_TOKEN` when that secret is set. It skips the
+check when the secret is absent, and the job is skipped on fork pull requests,
+which do not receive secrets.
 
 See [migration plan and compatibility notes](docs/MIGRATION.md).
 

@@ -4,6 +4,13 @@ inputs:
   GITHUB_TOKEN:
     description: "GitHub token"
     required: true
+  REVIEWER_ID:
+    description: "Identity written into the hidden review marker. Distinguishes this workflow from others that post as the same bot. Defaults to GITHUB_WORKFLOW/GITHUB_JOB when empty. Not read from repository YAML."
+    required: false
+  IDENTITY_ONLY:
+    description: "Resolve and log the bot identity (login, database id, and source), then exit before any model call or review publication. Used by the manual bot-identity workflow."
+    required: false
+    default: "false"
   AI_PROVIDER:
     description: "AI provider (openai, anthropic, google)"
     required: true
