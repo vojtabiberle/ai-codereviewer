@@ -1,6 +1,6 @@
 # Use the exact previously reviewed commit
 
-Status: step 1 implemented (bot identity and the hidden review marker). Baseline selection is not implemented.
+Status: step 1 implemented (bot identity and the hidden review marker). Baseline selection is not implemented. The step 3 design note ([001-incremental-baseline-design.md](001-incremental-baseline-design.md)) is open; the answers below stay as recorded until those questions are answered.
 Priority: P0 (proposed).
 
 ## Implementation progress
