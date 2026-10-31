@@ -1,6 +1,6 @@
 # Incremental review baseline (idea 001, step 3)
 
-Status: design only. No runtime code in this change. Baseline selection stays unimplemented until the questions below are answered.
+Status: approved and implemented. All seven questions were answered as recommended below. Valid comment lines (step 4) are still not implemented.
 
 This note is the step-3 brief checked against the answers already recorded in [001](001-reviewed-commit-sha.md) and [002](002-review-history-loading.md), and against `main` at `ab3d3c6`. Where the brief and those answers disagree, the question says so. Step 4 (comment lines taken from the pull request diff) is not part of this change.
 
@@ -89,11 +89,11 @@ GitHub documents 200, 404, 422, 500, and 503 for this endpoint. A diff that take
 
 Use separate sentences for the other fallbacks: `no previous review, full review`, `baseline base changed, full review`, and `baseline identical to head, skipping review`.
 
-## What the implementation will touch
+## What the implementation touches
 
-After the answers: `reviewHistory.ts` (marker `status`, `sha`, `base`, and review `state` on the loaded review; a pure baseline choice; applying compare results onto `outdated`), `GitHubService.ts` (delete the date heuristic; one compare helper), `DiffService.ts` (the range it is given), `ReviewService.ts` (`isUpdate` only for `ahead`; the identical skip), `main.ts` (the null return), the system-prompt sentence, unit tests, `dist/index.js`, and the status lines in 001. This design PR changes none of those.
+`reviewHistory.ts` (marker fields and review `state`; `selectBaseline`; applying compare results onto `outdated`), `GitHubService.ts` (the date heuristic is gone; JSON compare and paginated `pulls.listFiles`), `ReviewService.ts` (`isUpdate` only for `ahead`; the identical skip; the file intersection), `main.ts` (a null review exits 0), the system-prompt sentence, unit tests, and `dist/index.js`. `DiffService` still fetches `application/vnd.github.v3.diff` for the range it is given. `collectRightLines` is unchanged.
 
-## Tests to add with the implementation
+## Tests
 
 - A misleading commit date does not change the chosen SHA, and `pulls.listCommits` is not called.
 - A `DISMISSED` review with a complete matching marker advances the baseline.

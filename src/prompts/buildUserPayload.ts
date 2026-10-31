@@ -15,7 +15,8 @@ import { ReviewRequest } from '../providers/AIProvider';
  *                   gets cached. Keeping it here too would double-count
  *                   tokens and bypass caching.)
  *   - previousReviews: history already trimmed to the prompt budget.
- *                   A null line is left null and paired with outdated: true.
+ *                   A null line is left null. outdated is true for a null line
+ *                   and for a finding whose commit is not on the current head.
  *                   Replies from other authors are already abbreviated.
  */
 export function buildUserPayload(request: ReviewRequest): string {

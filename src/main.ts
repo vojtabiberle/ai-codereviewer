@@ -90,7 +90,8 @@ async function main() {
     
     // Perform review
     const review = await reviewService.performReview(prNumber);
-    
+    if (!review) return;
+
     core.info(`Review completed with ${review.lineComments?.length ?? 0} comments`);
     
   } catch (error: unknown) {

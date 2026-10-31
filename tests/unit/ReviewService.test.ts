@@ -21,7 +21,9 @@ function makeServices(aiResponse: ReviewResponse) {
       owner: 'o', repo: 'r', number: 1,
       title: 't', description: 'd', base: 'B', head: 'H'
     }),
-    getLastReviewedCommit: jest.fn().mockResolvedValue(null),
+    getReviewerId: jest.fn().mockReturnValue('CI/review'),
+    compareCommits: jest.fn().mockResolvedValue({ ok: true, status: 'ahead' }),
+    listPullRequestFilePaths: jest.fn().mockResolvedValue(new Set(['src/a.ts'])),
     getPreviousReviews: jest.fn().mockResolvedValue([]),
     getFileContent: jest.fn().mockResolvedValue('content'),
     submitReview: jest.fn().mockResolvedValue(undefined),
@@ -548,7 +550,7 @@ agentic_max_turns: 4
     expect(submitted[0].severity).toBe('major');
   });
 
-  it('loads history when the baseline heuristic is null and does not switch to the update prompt', async () => {
+  it('loads history for an unmarked review and does not switch to the update prompt', async () => {
     const { githubService, diffService, aiProvider } = makeServices({
       summary: 'sum', suggestedAction: 'COMMENT', confidence: 50, lineComments: [],
     });
@@ -563,8 +565,9 @@ agentic_max_turns: 4
       approveReviews: false,
     }).performReview(1);
 
-    expect(githubService.getLastReviewedCommit).toHaveBeenCalled();
     expect(githubService.getPreviousReviews).toHaveBeenCalledWith(1);
+    expect(diffService.getRelevantFiles).toHaveBeenCalledWith(expect.objectContaining({ base: 'B', head: 'H' }));
+    expect((diffService.getRelevantFiles as jest.Mock).mock.calls[0][1]).toBeUndefined();
     const request = (aiProvider as StubAIProvider).lastRequest;
     expect(request.context.isUpdate).toBe(false);
     expect(buildSystemPrompt(request)).not.toContain('When reviewing updates');
@@ -737,7 +740,11 @@ function historyReview(overrides: Partial<HistoryReview> = {}): HistoryReview {
     commit: 'abc',
     summary: 'previous summary',
     submittedAt: '2024-01-01T00:00:00Z',
+    state: null,
     reviewerId: null,
+    markerSha: null,
+    markerBase: null,
+    markerStatus: null,
     lineComments: [],
     ...overrides,
   };
@@ -808,5 +815,322 @@ describe('ReviewService trust and input boundaries', () => {
     await expect(service.performReview(1)).rejects.toThrow('rate limited');
     expect(review).toHaveBeenCalledTimes(1);
     expect(githubService.submitReview).not.toHaveBeenCalled();
+  });
+});
+
+describe('incremental review baseline', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const HEAD = 'h'.repeat(40);
+  const BASE = 'b'.repeat(40);
+  const OLD = 'a'.repeat(40);
+  const NEWER = 'c'.repeat(40);
+  const response: ReviewResponse = {
+    summary: 'sum',
+    suggestedAction: 'COMMENT',
+    confidence: 50,
+    lineComments: [],
+  };
+
+  function pull(githubService: GitHubService, base = BASE, head = HEAD) {
+    (githubService.getPRDetails as jest.Mock).mockResolvedValue({
+      owner: 'o', repo: 'r', number: 1, title: 't', description: 'd', base, head,
+    });
+  }
+
+  function qualifying(overrides: Partial<HistoryReview> = {}): HistoryReview {
+    return historyReview({
+      state: 'COMMENTED',
+      reviewerId: 'CI/review',
+      markerStatus: 'complete',
+      markerSha: OLD,
+      markerBase: BASE,
+      commit: OLD,
+      lineComments: [],
+      ...overrides,
+    });
+  }
+
+  function reviewWith(githubService: GitHubService, diffService: DiffService, aiProvider: StubAIProvider) {
+    return new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0,
+      approveReviews: false,
+    });
+  }
+
+  it('reviews only the ahead range intersected with the pull request files', async () => {
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([qualifying()]);
+    (githubService.compareCommits as jest.Mock).mockResolvedValue({ ok: true, status: 'ahead' });
+    (diffService.getRelevantFiles as jest.Mock).mockResolvedValue([
+      { path: 'src/a.ts', diff: '@@', validRightLines: new Set([1]) },
+      { path: 'upstream.ts', diff: '@@', validRightLines: new Set([4]) },
+    ]);
+    (githubService.listPullRequestFilePaths as jest.Mock).mockResolvedValue(new Set(['src/a.ts']));
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    expect(githubService.compareCommits).toHaveBeenCalledTimes(1);
+    expect(githubService.compareCommits).toHaveBeenCalledWith(OLD, HEAD);
+    expect(diffService.getRelevantFiles).toHaveBeenCalledWith(expect.anything(), OLD);
+    expect(aiProvider.lastRequest.files.map((file: { path: string }) => file.path)).toEqual(['src/a.ts']);
+    expect(aiProvider.lastRequest.context.isUpdate).toBe(true);
+    expect(buildSystemPrompt(aiProvider.lastRequest)).toContain('When reviewing updates');
+  });
+
+  it('keeps a dismissed review as the baseline', async () => {
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      qualifying({ state: 'DISMISSED' }),
+    ]);
+    (githubService.compareCommits as jest.Mock).mockResolvedValue({ ok: true, status: 'ahead' });
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    expect(diffService.getRelevantFiles).toHaveBeenCalledWith(expect.anything(), OLD);
+    expect(aiProvider.lastRequest.context.isUpdate).toBe(true);
+  });
+
+  it('uses the previous complete sha when the newest marker is degraded', async () => {
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      qualifying({ id: 1, submittedAt: '2024-01-01T00:00:00Z' }),
+      qualifying({
+        id: 2,
+        submittedAt: '2024-06-01T00:00:00Z',
+        commit: NEWER,
+        markerSha: NEWER,
+        markerStatus: 'degraded',
+      }),
+    ]);
+    (githubService.compareCommits as jest.Mock).mockResolvedValue({ ok: true, status: 'ahead' });
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    expect(githubService.compareCommits).toHaveBeenCalledWith(OLD, HEAD);
+    expect(diffService.getRelevantFiles).toHaveBeenCalledWith(expect.anything(), OLD);
+  });
+
+  it.each([
+    ['diverged', { ok: true, status: 'diverged' }, 'baseline unreachable, full review: diverged'],
+    ['behind', { ok: true, status: 'behind' }, 'baseline unreachable, full review: behind'],
+    ['404', { ok: false, statusCode: 404 }, 'baseline unreachable, full review: HTTP 404'],
+    ['422', { ok: false, statusCode: 422 }, 'baseline unreachable, full review: HTTP 422'],
+  ] as const)('falls back to a full review when compare is %s', async (_label, compared, message) => {
+    const info = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      qualifying({ id: 1, submittedAt: '2024-01-01T00:00:00Z' }),
+      qualifying({
+        id: 2,
+        submittedAt: '2024-06-01T00:00:00Z',
+        commit: NEWER,
+        markerSha: NEWER,
+      }),
+    ]);
+    (githubService.compareCommits as jest.Mock).mockResolvedValue(compared);
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    expect(info).toHaveBeenCalledWith(message);
+    expect((githubService.compareCommits as jest.Mock).mock.calls[0][0]).toBe(NEWER);
+    expect((diffService.getRelevantFiles as jest.Mock).mock.calls[0][1]).toBeUndefined();
+    expect(aiProvider.lastRequest.context.isUpdate).toBe(false);
+    expect(githubService.submitReview).toHaveBeenCalled();
+    info.mockRestore();
+  });
+
+  it('does not walk to an older sha after a diverged compare', async () => {
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      qualifying({ id: 1, submittedAt: '2024-01-01T00:00:00Z' }),
+      qualifying({
+        id: 2,
+        submittedAt: '2024-06-01T00:00:00Z',
+        commit: NEWER,
+        markerSha: NEWER,
+      }),
+    ]);
+    (githubService.compareCommits as jest.Mock).mockResolvedValue({ ok: true, status: 'diverged' });
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    const ranges = (diffService.getRelevantFiles as jest.Mock).mock.calls.map(call => call[1]);
+    expect(ranges).not.toContain(OLD);
+    expect(ranges).not.toContain(NEWER);
+  });
+
+  it('skips the model when the qualifying sha is already the head', async () => {
+    const info = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService, BASE, OLD);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([qualifying()]);
+    const review = jest.spyOn(aiProvider, 'review');
+
+    await expect(reviewWith(githubService, diffService, aiProvider).performReview(1)).resolves.toBeNull();
+
+    expect(info).toHaveBeenCalledWith('baseline identical to head, skipping review');
+    expect(review).not.toHaveBeenCalled();
+    expect(githubService.submitReview).not.toHaveBeenCalled();
+    expect(githubService.compareCommits).not.toHaveBeenCalled();
+    expect(diffService.getRelevantFiles).not.toHaveBeenCalled();
+    info.mockRestore();
+  });
+
+  it('reviews the whole pull request when base.sha changed, before the identical-head skip', async () => {
+    const info = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService, 'f'.repeat(40), OLD);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([qualifying()]);
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    expect(info).toHaveBeenCalledWith('baseline base changed, full review');
+    expect((githubService.compareCommits as jest.Mock).mock.invocationCallOrder[0]).toBeGreaterThan(0);
+    expect((diffService.getRelevantFiles as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      (githubService.compareCommits as jest.Mock).mock.invocationCallOrder[0],
+    );
+    expect((diffService.getRelevantFiles as jest.Mock).mock.calls[0][1]).toBeUndefined();
+    expect(aiProvider.lastRequest.context.isUpdate).toBe(false);
+    expect(githubService.submitReview).toHaveBeenCalled();
+    info.mockRestore();
+  });
+
+  it('does not advance the baseline for another reviewer or a sha/commit_id mismatch', async () => {
+    const debug = jest.spyOn(require('@actions/core'), 'debug').mockImplementation(() => {});
+    const info = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      qualifying({ id: 1, reviewerId: 'Other/job', commit: NEWER, markerSha: NEWER }),
+      qualifying({ id: 2, commit: NEWER, markerSha: OLD }),
+    ]);
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    expect(debug).toHaveBeenCalledWith('marker sha differs from commit_id review=2');
+    expect(info).toHaveBeenCalledWith('no previous review, full review');
+    expect((diffService.getRelevantFiles as jest.Mock).mock.calls[0][1]).toBeUndefined();
+    expect(aiProvider.lastRequest.context.isUpdate).toBe(false);
+    debug.mockRestore();
+    info.mockRestore();
+  });
+
+  it('fails the run when compare returns 500 or the network fails', async () => {
+    const unavailable = Object.assign(new Error('unavailable'), { status: 500 });
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([qualifying()]);
+    (githubService.compareCommits as jest.Mock).mockRejectedValue(unavailable);
+    const review = jest.spyOn(aiProvider, 'review');
+
+    await expect(reviewWith(githubService, diffService, aiProvider).performReview(1)).rejects.toBe(unavailable);
+    expect(review).not.toHaveBeenCalled();
+
+    const network = makeServices(response);
+    pull(network.githubService);
+    (network.githubService.getPreviousReviews as jest.Mock).mockResolvedValue([qualifying()]);
+    (network.githubService.compareCommits as jest.Mock).mockRejectedValue(new Error('socket hang up'));
+    await expect(reviewWith(network.githubService, network.diffService, network.aiProvider).performReview(1))
+      .rejects.toThrow('socket hang up');
+  });
+
+  it('fails the run when the diff fetch fails after an ahead compare', async () => {
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([qualifying()]);
+    (githubService.compareCommits as jest.Mock).mockResolvedValue({ ok: true, status: 'ahead' });
+    (diffService.getRelevantFiles as jest.Mock).mockRejectedValue(new Error('diff failed'));
+    const review = jest.spyOn(aiProvider, 'review');
+
+    await expect(reviewWith(githubService, diffService, aiProvider).performReview(1)).rejects.toThrow('diff failed');
+    expect(review).not.toHaveBeenCalled();
+    expect(githubService.submitReview).not.toHaveBeenCalled();
+  });
+
+  it('marks a diverged finding outdated without changing the dedup key', async () => {
+    const findingSha = 'd'.repeat(40);
+    const { githubService, diffService, aiProvider } = makeServices({
+      ...response,
+      lineComments: [
+        { path: 'src/a.ts', line: 9, comment: 'Keep me', severity: 'major' },
+        { path: 'src/a.ts', line: 1, comment: 'Fresh', severity: 'major' },
+      ],
+    });
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      qualifying({
+        lineComments: [historyComment({
+          commitId: findingSha,
+          originalCommitId: findingSha,
+          line: 9,
+          originalLine: 3,
+          body: 'Keep me',
+          outdated: false,
+        })],
+      }),
+    ]);
+    (githubService.compareCommits as jest.Mock).mockImplementation(async (sha: string) => (
+      sha === findingSha ? { ok: true, status: 'diverged' } : { ok: true, status: 'ahead' }
+    ));
+    (diffService.getRelevantFiles as jest.Mock).mockResolvedValue([
+      { path: 'src/a.ts', diff: '@@', validRightLines: new Set([1, 9]) },
+    ]);
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    const rendered = JSON.stringify(aiProvider.lastRequest.previousReviews);
+    expect(rendered).toContain('"line":9');
+    expect(rendered).toContain('"outdated":true');
+    const submitted = (githubService.submitReview as jest.Mock).mock.calls[0][1].lineComments;
+    expect(submitted.map((comment: { comment: string }) => comment.comment)).toEqual(['Fresh']);
+    expect(githubService.compareCommits).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops comparing finding SHAs after 30 and compares at most 4 at a time', async () => {
+    const warn = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
+    const { githubService, diffService, aiProvider } = makeServices(response);
+    pull(githubService);
+    const findings = Array.from({ length: 31 }, (_, index) => {
+      const commitId = (index + 1).toString(16).padStart(40, '0');
+      return historyComment({
+        id: index + 1,
+        commitId,
+        originalCommitId: commitId,
+        line: index + 1,
+        body: `finding ${index + 1}`,
+        outdated: false,
+      });
+    });
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      qualifying({ lineComments: findings }),
+    ]);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    (githubService.compareCommits as jest.Mock).mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return { ok: true, status: 'diverged' };
+    });
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    const compared = (githubService.compareCommits as jest.Mock).mock.calls.map(call => call[0] as string);
+    expect(compared).toHaveLength(30);
+    expect(compared[0]).toBe(OLD);
+    expect(compared).not.toContain(findings[29].commitId);
+    expect(compared).not.toContain(findings[30].commitId);
+    expect(maxInFlight).toBe(4);
+    expect(warn).toHaveBeenCalledWith('history compare cap, 30 SHAs');
+    warn.mockRestore();
   });
 });

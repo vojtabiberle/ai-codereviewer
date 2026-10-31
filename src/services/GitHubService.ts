@@ -13,6 +13,10 @@ import {
   reviewBelongsToThisAction,
 } from './reviewHistory';
 
+export type CompareCommitsResult =
+  | { ok: true; status: string }
+  | { ok: false; statusCode: 404 | 422 };
+
 export interface PRDetails {
   owner: string;
   repo: string;
@@ -167,6 +171,10 @@ export class GitHubService {
     }
   }
 
+  getReviewerId(): string {
+    return this.currentReviewerId();
+  }
+
   private currentReviewerId(): string {
     return resolveReviewerId(this.reviewerIdOverride);
   }
@@ -307,91 +315,38 @@ export class GitHubService {
     return { kept, dropped };
   }
 
-  async getLastReviewSubmittedAt(prNumber: number): Promise<string | null> {
-    const botLogin = await this.getBotLogin();
-    if (!botLogin) return null;
-    // Get the first page to check pagination info
-    const firstResponse = await this.octokit.pulls.listReviews({
-      owner: this.owner,
-      repo: this.repo,
-      pull_number: prNumber,
-      per_page: 100,
-      page: 1
-    });
-
-    // Get the last page number from the Link header
-    const linkHeader = firstResponse.headers.link;
-
-    // If no link header or only one page, process the first response directly
-    if (!linkHeader) {
-      const botReview = firstResponse.data
-        .reverse()
-        .find(review => review.user?.login === botLogin);
-
-      return botReview?.submitted_at || null;
-    }
-
-    // Get the last page number
-    const lastPageMatch = linkHeader.match(/page=(\d+)>; rel="last"/);
-    const lastPage = lastPageMatch ? parseInt(lastPageMatch[1], 10) : 1;
-
-    // If only one page, process the first response we already have
-    if (lastPage === 1) {
-      const botReview = firstResponse.data
-        .reverse()
-        .find(review => review.user?.login === botLogin);
-
-      return botReview?.submitted_at || null;
-    }
-
-    // Multiple pages - start from the last page and move backward
-    for (let page = lastPage; page > 1; page--) {
-      const response = await this.octokit.pulls.listReviews({
+  /**
+   * JSON compare of `base...head`. 404 and 422 mean the baseline commit is
+   * unreachable. 500, 503, and network errors propagate and fail the run.
+   */
+  async compareCommits(base: string, head: string): Promise<CompareCommitsResult> {
+    try {
+      const { data } = await this.octokit.repos.compareCommitsWithBasehead({
         owner: this.owner,
         repo: this.repo,
-        pull_number: prNumber,
-        per_page: 100,
-        page
+        basehead: `${base}...${head}`,
       });
-
-      const botReview = response.data
-        .reverse()
-        .find(review => review.user?.login === botLogin);
-
-      if (botReview?.submitted_at) {
-        return botReview.submitted_at;
-      }
+      return { ok: true, status: typeof data.status === 'string' ? data.status : '' };
+    } catch (error) {
+      const status = httpStatus(error);
+      if (status === 404 || status === 422) return { ok: false, statusCode: status };
+      throw error;
     }
-
-    // Check first page last since we're going backwards
-    const botReview = firstResponse.data
-      .reverse()
-      .find(review => review.user?.login === botLogin);
-
-    return botReview?.submitted_at || null;
   }
 
-  async getLastReviewedCommit(prNumber: number): Promise<string | null> {
-    
-   const lastReviewSubmittedAt = await this.getLastReviewSubmittedAt(prNumber);
-
-    if (!lastReviewSubmittedAt) return null;
-
-    // Get the commit SHA at the time of the review
-    const { data: commits } = await this.octokit.pulls.listCommits({
+  /** Paths in the pull request diff. Paginated so the 300-file compare cap does not apply. */
+  async listPullRequestFilePaths(prNumber: number): Promise<Set<string>> {
+    const files = await this.octokit.paginate(this.octokit.pulls.listFiles, {
       owner: this.owner,
       repo: this.repo,
       pull_number: prNumber,
       per_page: 100,
     });
-
-    const reviewDate = new Date(lastReviewSubmittedAt!);
-    const lastCommit = commits
-      .reverse()
-      .find(commit => commit.commit.committer?.date &&
-        new Date(commit.commit.committer.date) <= reviewDate);
-
-    return lastCommit?.sha || null;
+    const paths = new Set<string>();
+    for (const file of files) {
+      if (file.filename) paths.add(file.filename);
+    }
+    return paths;
   }
 
   /**

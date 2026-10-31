@@ -1,6 +1,6 @@
 # Use the exact previously reviewed commit
 
-Status: step 1 implemented (bot identity and the hidden review marker). Baseline selection is not implemented. The step 3 design note ([001-incremental-baseline-design.md](001-incremental-baseline-design.md)) is open; the answers below stay as recorded until those questions are answered.
+Status: step 1 (bot identity and the hidden review marker) and step 3 (incremental baseline) are implemented. Valid comment lines from the pull request diff are not. The step 3 decisions are in [001-incremental-baseline-design.md](001-incremental-baseline-design.md).
 Priority: P0 (proposed).
 
 ## Implementation progress
@@ -19,11 +19,23 @@ response supplies the id instead.
 Every published review body includes one hidden marker. The bytes are defined
 below. `status=degraded` is the summary-only publish after a 422 for comment
 locations. `REVIEWER_ID` is an optional action input and is not read from
-repository YAML. A version-tolerant parser ignores unmarked reviews. Baseline
-selection, the compare-status check, and the full-review fallback are not
-implemented. History loading ([002](002-review-history-loading.md)) reads reviews
-and review comments once over REST and matches this bot by numeric id when the
-identity lookup has one.
+repository YAML. A version-tolerant parser ignores unmarked reviews. History
+loading ([002](002-review-history-loading.md)) reads reviews and review comments
+once over REST and matches this bot by numeric id when the identity lookup has one.
+
+Step 3 selects the baseline from those reviews. The qualifying review is the
+newest one by this reviewer in state `COMMENTED`, `APPROVED`, `CHANGES_REQUESTED`,
+or `DISMISSED`, with `status=complete` and marker `sha` equal to `commit_id`
+(40–64 hex). Unmarked reviews, `degraded` markers, other reviewer ids, and a
+sha/`commit_id` mismatch do not qualify. One JSON compare of that sha against
+head decides the range. `ahead` reviews that range intersected with paginated
+`pulls.listFiles`. `identical` logs `baseline identical to head, skipping review`
+and does not call the model. `diverged`, `behind`, any other status, HTTP 404,
+and HTTP 422 log `baseline unreachable, full review` with the reason and review
+`base...head`. A changed `base.sha` is a full review, checked before the
+identical-head skip. A bad compare does not try an older SHA. Findings whose
+commits are not `ahead` or `identical` are marked outdated, at most 30 SHAs,
+4 compares at a time. Valid comment lines still come from the diff that was fetched.
 
 ## Review marker format
 

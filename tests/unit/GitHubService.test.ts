@@ -10,6 +10,9 @@ const getAuthenticated = jest.fn().mockResolvedValue({
 const graphql = jest.fn();
 const listReviews = jest.fn();
 const listReviewComments = jest.fn();
+const listFiles = jest.fn();
+const listCommits = jest.fn();
+const compareCommitsWithBasehead = jest.fn();
 
 async function passThroughPaginate(
   endpoint: (params: unknown) => Promise<{ data: unknown[] }>,
@@ -24,7 +27,8 @@ const paginate = jest.fn(passThroughPaginate);
 
 jest.mock('@octokit/rest', () => ({
   Octokit: jest.fn().mockImplementation(() => ({
-    pulls: { createReview, get: getPR, listReviews, listReviewComments },
+    pulls: { createReview, get: getPR, listReviews, listReviewComments, listFiles, listCommits },
+    repos: { compareCommitsWithBasehead },
     users: { getAuthenticated },
     paginate,
     graphql,
@@ -44,6 +48,9 @@ describe('GitHubService.submitReview', () => {
     graphql.mockReset();
     listReviews.mockReset();
     listReviewComments.mockReset();
+    listFiles.mockReset();
+    listCommits.mockReset();
+    compareCommitsWithBasehead.mockReset();
     paginate.mockReset();
     paginate.mockImplementation(passThroughPaginate);
     process.env.GITHUB_REPOSITORY = 'octocat/hello';
@@ -414,17 +421,76 @@ describe('GitHubService bot identity', () => {
     warnSpy.mockRestore();
   });
 
-  it('reads the last review time from the resolved App bot, not github-actions[bot]', async () => {
+  it('does not call pulls.listCommits while loading history', async () => {
     graphql.mockResolvedValue({ viewer: { login: 'my-app[bot]', databaseId: 12345 } });
-    listReviews.mockResolvedValue({
-      data: [
-        { user: { login: 'github-actions[bot]' }, submitted_at: '2020-01-01T00:00:00Z' },
-        { user: { login: 'my-app[bot]' }, submitted_at: '2024-01-01T00:00:00Z' },
-      ],
-      headers: {},
-    });
+    listReviews.mockResolvedValue({ data: [], headers: {} });
 
-    await expect(new GitHubService('ghs_app').getLastReviewSubmittedAt(4)).resolves.toBe('2024-01-01T00:00:00Z');
+    await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
+
+    expect(listCommits).not.toHaveBeenCalled();
+  });
+});
+
+describe('GitHubService.compareCommits', () => {
+  beforeEach(() => {
+    compareCommitsWithBasehead.mockReset();
+    process.env.GITHUB_REPOSITORY = 'octocat/hello';
+  });
+
+  it('requests a three-dot JSON compare and returns the status', async () => {
+    compareCommitsWithBasehead.mockResolvedValue({ data: { status: 'ahead' } });
+    const base = 'a'.repeat(40);
+    const head = 'b'.repeat(40);
+
+    await expect(new GitHubService('token').compareCommits(base, head)).resolves.toEqual({ ok: true, status: 'ahead' });
+    expect(compareCommitsWithBasehead).toHaveBeenCalledWith({
+      owner: 'octocat',
+      repo: 'hello',
+      basehead: `${base}...${head}`,
+    });
+  });
+
+  it.each([404, 422] as const)('reports HTTP %s without failing the run', async status => {
+    compareCommitsWithBasehead.mockRejectedValue(Object.assign(new Error('missing'), { status }));
+    await expect(new GitHubService('token').compareCommits('a'.repeat(40), 'b'.repeat(40)))
+      .resolves.toEqual({ ok: false, statusCode: status });
+  });
+
+  it.each([500, 503] as const)('fails the run on HTTP %s', async status => {
+    const error = Object.assign(new Error('unavailable'), { status });
+    compareCommitsWithBasehead.mockRejectedValue(error);
+    await expect(new GitHubService('token').compareCommits('a'.repeat(40), 'b'.repeat(40))).rejects.toBe(error);
+  });
+
+  it('fails the run on a network error', async () => {
+    const error = new Error('socket hang up');
+    compareCommitsWithBasehead.mockRejectedValue(error);
+    await expect(new GitHubService('token').compareCommits('a'.repeat(40), 'b'.repeat(40))).rejects.toBe(error);
+  });
+});
+
+describe('GitHubService.listPullRequestFilePaths', () => {
+  beforeEach(() => {
+    paginate.mockReset();
+    process.env.GITHUB_REPOSITORY = 'octocat/hello';
+  });
+
+  it('collects filenames from every page', async () => {
+    paginate.mockResolvedValue([
+      { filename: 'src/a.ts' },
+      { filename: 'src/b.ts' },
+      { filename: '' },
+    ]);
+
+    const paths = await new GitHubService('token').listPullRequestFilePaths(9);
+
+    expect(paginate).toHaveBeenCalledWith(listFiles, expect.objectContaining({
+      owner: 'octocat',
+      repo: 'hello',
+      pull_number: 9,
+      per_page: 100,
+    }));
+    expect([...paths]).toEqual(['src/a.ts', 'src/b.ts']);
   });
 });
 
