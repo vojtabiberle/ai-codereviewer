@@ -6,7 +6,7 @@ before implementation. [001](001-reviewed-commit-sha.md) and [002](002-review-hi
 record settled answers; the others still have open questions.
 [001](001-reviewed-commit-sha.md) step 1 (bot identity and the hidden review marker)
 is implemented. [002](002-review-history-loading.md) (one REST load of review
-history, the comment page cap, and `HISTORY_MAX_BYTES`) is implemented.
+history, a 20-page cap on reviews and review comments, and `HISTORY_MAX_BYTES`) is implemented.
 The rest of this backlog, including baseline selection in 001, is not.
 
 Proposed priorities: P0 correctness prerequisites; P1 comment lifecycle and shared

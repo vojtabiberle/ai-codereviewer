@@ -136,10 +136,10 @@ marker names a different `reviewer` is another workflow and is left out.
 Markers on human reviews are ignored. Human comments are not stored as this
 action's findings.
 
-Review comments are fetched once, not once per review, because
-`GET /pulls/{n}/comments` ignores `review_id`. At most 20 pages of 100 comments
-are loaded. Passing that cap logs a warning and deduplication uses the comments
-that were loaded. Every review page is still read.
+Reviews and review comments are each loaded once with `octokit.paginate`.
+`GET /pulls/{n}/comments` ignores `review_id`, so comments are not fetched per
+review. Each listing stops after 20 pages of 100. Hitting that cap logs a
+warning and the run continues with the pages that were loaded.
 
 The model sees at most `HISTORY_MAX_BYTES` of that history (default `120000`;
 the enforced budget is also capped by `MAX_INPUT_BYTES`). Fill order, newest

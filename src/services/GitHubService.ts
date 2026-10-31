@@ -5,11 +5,11 @@ import { ReviewResponse } from '../providers/AIProvider';
 import { resolveReviewerId, withReviewMarker } from './reviewMarker';
 import {
   groupReviewHistory,
+  HISTORY_PAGE_CAP,
   HISTORY_PAGE_SIZE,
   HistoryReview,
   ListedComment,
   ListedReview,
-  REVIEW_COMMENT_PAGE_CAP,
   reviewBelongsToThisAction,
 } from './reviewHistory';
 
@@ -406,14 +406,20 @@ export class GitHubService {
       return [];
     }
 
-    const rawReviews = await this.eachPage<ListedReview>(page =>
-      this.octokit.pulls.listReviews({
-        owner: this.owner,
-        repo: this.repo,
-        pull_number: prNumber,
-        per_page: HISTORY_PAGE_SIZE,
-        page,
-      })
+    const params = {
+      owner: this.owner,
+      repo: this.repo,
+      pull_number: prNumber,
+      per_page: HISTORY_PAGE_SIZE,
+    };
+    const rawReviews = await this.octokit.paginate(
+      this.octokit.pulls.listReviews,
+      params,
+      capHistoryPages(loaded => {
+        core.warning(
+          `Stopped loading pull request reviews after ${HISTORY_PAGE_CAP} pages of ${HISTORY_PAGE_SIZE} (${loaded} reviews). Continuing with the reviews that were loaded.`
+        );
+      }),
     );
 
     const reviewerId = this.currentReviewerId();
@@ -421,51 +427,39 @@ export class GitHubService {
     core.debug(`Found ${ours.length} reviews by this action (${rawReviews.length} total)`);
     if (ours.length === 0) return [];
 
-    const rawComments = await this.eachPage<ListedComment>(
-      page => this.octokit.pulls.listReviewComments({
-        owner: this.owner,
-        repo: this.repo,
-        pull_number: prNumber,
-        per_page: HISTORY_PAGE_SIZE,
-        page,
+    const rawComments = await this.octokit.paginate(
+      this.octokit.pulls.listReviewComments,
+      params,
+      capHistoryPages(loaded => {
+        core.warning(
+          `Stopped loading pull request review comments after ${HISTORY_PAGE_CAP} pages of ${HISTORY_PAGE_SIZE} (${loaded} comments). Deduplicating from the comments that were loaded.`
+        );
       }),
-      {
-        cap: REVIEW_COMMENT_PAGE_CAP,
-        onCap: loaded => {
-          core.warning(
-            `Stopped loading pull request review comments after ${REVIEW_COMMENT_PAGE_CAP} pages of ${HISTORY_PAGE_SIZE} (${loaded} comments). Deduplicating from the comments that were loaded.`
-          );
-        },
-      }
     );
 
     const grouped = groupReviewHistory(ours, rawComments, identity);
     core.debug(`Grouped ${rawComments.length} review comments onto ${grouped.length} previous reviews`);
     return grouped;
   }
+}
 
-  /**
-   * Follow `rel="next"` page by page. `cap` stops after that many pages when
-   * another page exists; a list that ends on the cap page is complete.
-   */
-  private async eachPage<T>(
-    fetchPage: (page: number) => Promise<{ data: readonly T[]; headers?: { link?: unknown } }>,
-    options?: { cap?: number; onCap?: (loaded: number) => void }
-  ): Promise<T[]> {
-    const loaded: T[] = [];
-    let page = 1;
-    for (;;) {
-      const response = await fetchPage(page);
-      loaded.push(...response.data);
-      const hasNext = linkHeader(response.headers?.link).includes('rel="next"');
-      if (!hasNext) return loaded;
-      if (options?.cap !== undefined && page >= options.cap) {
-        options.onCap?.(loaded.length);
-        return loaded;
-      }
-      page += 1;
+/**
+ * Map callback for `octokit.paginate`. Calls `done()` after HISTORY_PAGE_CAP
+ * pages when another page exists, and keeps the pages already returned.
+ */
+function capHistoryPages<T>(onCap: (loaded: number) => void) {
+  let pages = 0;
+  let loaded = 0;
+  return (response: { data: T[]; headers: { link?: string } }, done: () => void): T[] => {
+    pages += 1;
+    const batch = response.data;
+    loaded += batch.length;
+    if (pages >= HISTORY_PAGE_CAP && linkHeader(response.headers.link).includes('rel="next"')) {
+      onCap(loaded);
+      done();
     }
-  }
+    return batch;
+  };
 }
 
 function linkHeader(value: unknown): string {

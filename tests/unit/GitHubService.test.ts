@@ -1,5 +1,5 @@
 import { GitHubService } from '../../src/services/GitHubService';
-import { HISTORY_PAGE_SIZE, REVIEW_COMMENT_PAGE_CAP } from '../../src/services/reviewHistory';
+import { HISTORY_PAGE_CAP, HISTORY_PAGE_SIZE } from '../../src/services/reviewHistory';
 import { formatReviewMarker, parseReviewMarker } from '../../src/services/reviewMarker';
 
 const createReview = jest.fn().mockResolvedValue({ data: { id: 1 } });
@@ -11,10 +11,22 @@ const graphql = jest.fn();
 const listReviews = jest.fn();
 const listReviewComments = jest.fn();
 
+async function passThroughPaginate(
+  endpoint: (params: unknown) => Promise<{ data: unknown[] }>,
+  params: unknown,
+  mapFn?: (response: { data: unknown[]; headers?: { link?: string } }, done: () => void) => unknown[],
+) {
+  const response = await endpoint(params);
+  return mapFn ? mapFn(response, () => {}) : response.data;
+}
+
+const paginate = jest.fn(passThroughPaginate);
+
 jest.mock('@octokit/rest', () => ({
   Octokit: jest.fn().mockImplementation(() => ({
     pulls: { createReview, get: getPR, listReviews, listReviewComments },
     users: { getAuthenticated },
+    paginate,
     graphql,
   }))
 }));
@@ -32,6 +44,8 @@ describe('GitHubService.submitReview', () => {
     graphql.mockReset();
     listReviews.mockReset();
     listReviewComments.mockReset();
+    paginate.mockReset();
+    paginate.mockImplementation(passThroughPaginate);
     process.env.GITHUB_REPOSITORY = 'octocat/hello';
     process.env.GITHUB_WORKFLOW = 'CI';
     process.env.GITHUB_JOB = 'review';
@@ -191,6 +205,8 @@ describe('GitHubService bot identity', () => {
     graphql.mockReset();
     listReviews.mockReset();
     listReviewComments.mockReset().mockResolvedValue({ data: [], headers: {} });
+    paginate.mockReset();
+    paginate.mockImplementation(passThroughPaginate);
     process.env.GITHUB_REPOSITORY = 'octocat/hello';
     delete process.env.GITHUB_TOKEN;
   });
@@ -378,8 +394,8 @@ describe('GitHubService bot identity', () => {
       repo: 'hello',
       pull_number: 9,
       per_page: HISTORY_PAGE_SIZE,
-      page: 1,
     });
+    expect(listReviewComments.mock.calls[0][0]).not.toHaveProperty('page');
   });
 
   it('does not attribute github-actions[bot] reviews when identity is unresolved', async () => {
@@ -448,61 +464,64 @@ function commentRecord(id: number, reviewId: number, overrides: Record<string, u
   };
 }
 
+function loadUntilDone(
+  mapFn: (response: { data: unknown[]; headers: { link?: string } }, done: () => void) => unknown[],
+  item: (page: number) => unknown,
+): { loaded: unknown[]; pagesRead: number } {
+  const loaded: unknown[] = [];
+  let pagesRead = 0;
+  for (let page = 1; page <= HISTORY_PAGE_CAP + 5; page++) {
+    let stopped = false;
+    const batch = mapFn({
+      data: [item(page)],
+      headers: { link: '<https://example.test>; rel="next"' },
+    }, () => { stopped = true; });
+    loaded.push(...batch);
+    pagesRead = page;
+    if (stopped) break;
+  }
+  return { loaded, pagesRead };
+}
+
 describe('GitHubService.getPreviousReviews', () => {
   beforeEach(() => {
     graphql.mockReset().mockResolvedValue({ viewer: { login: 'my-app[bot]', databaseId: 12345 } });
     listReviews.mockReset();
     listReviewComments.mockReset();
+    paginate.mockReset();
+    paginate.mockImplementation(passThroughPaginate);
     process.env.GITHUB_REPOSITORY = 'octocat/hello';
     delete process.env.GITHUB_TOKEN;
   });
 
-  it('paginates reviews and comments once, groups by review id, and keeps replies and a null line', async () => {
-    listReviews.mockImplementation(async ({ page }: { page: number }) => {
-      if (page === 1) {
-        return {
-          data: [reviewRecord(1), reviewRecord(2)],
-          headers: { link: '<https://example.test?page=2>; rel="next"' },
-        };
-      }
-      return { data: [reviewRecord(3)], headers: {} };
+  it('groups comments by review id and keeps replies and a null line', async () => {
+    listReviews.mockResolvedValue({
+      data: [reviewRecord(1), reviewRecord(2), reviewRecord(3)],
+      headers: {},
     });
-    listReviewComments.mockImplementation(async ({ page }: { page: number }) => {
-      if (page === 1) {
-        return {
-          data: [
-            commentRecord(10, 1, { body: 'finding-a', line: 4, original_line: 4 }),
-            commentRecord(11, 2, { body: 'stale', line: null, original_line: 9 }),
-            commentRecord(13, 1, { body: 'human on our review', user: { login: 'octocat', id: 7, type: 'User' } }),
-            commentRecord(12, 99, { body: 'human finding', user: { login: 'octocat', id: 7, type: 'User' } }),
-          ],
-          headers: { link: '<https://example.test?page=2>; rel="next"' },
-        };
-      }
-      return {
-        data: [
-          commentRecord(14, 3, { body: 'finding-c' }),
-          commentRecord(15, 50, {
-            body: `human reply ${'x'.repeat(200)}`,
-            in_reply_to_id: 10,
-            user: { login: 'octocat', id: 7, type: 'User' },
-          }),
-          commentRecord(16, 1, { body: 'bot follow-up', in_reply_to_id: 15 }),
-        ],
-        headers: {},
-      };
+    listReviewComments.mockResolvedValue({
+      data: [
+        commentRecord(10, 1, { body: 'finding-a', line: 4, original_line: 4 }),
+        commentRecord(11, 2, { body: 'stale', line: null, original_line: 9 }),
+        commentRecord(13, 1, { body: 'human on our review', user: { login: 'octocat', id: 7, type: 'User' } }),
+        commentRecord(12, 99, { body: 'human finding', user: { login: 'octocat', id: 7, type: 'User' } }),
+        commentRecord(14, 3, { body: 'finding-c' }),
+        commentRecord(15, 50, {
+          body: `human reply ${'x'.repeat(200)}`,
+          in_reply_to_id: 10,
+          user: { login: 'octocat', id: 7, type: 'User' },
+        }),
+        commentRecord(16, 1, { body: 'bot follow-up', in_reply_to_id: 15 }),
+      ],
+      headers: {},
     });
 
     const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
 
-    expect(listReviews).toHaveBeenCalledTimes(2);
-    expect(listReviews.mock.calls.map(call => call[0].page)).toEqual([1, 2]);
-    expect(listReviewComments).toHaveBeenCalledTimes(2);
-    expect(listReviewComments.mock.calls.map(call => call[0].page)).toEqual([1, 2]);
-    for (const call of listReviewComments.mock.calls) {
-      expect(call[0]).not.toHaveProperty('review_id');
-      expect(call[0].per_page).toBe(HISTORY_PAGE_SIZE);
-    }
+    expect(paginate).toHaveBeenCalledWith(listReviews, expect.not.objectContaining({ review_id: expect.anything() }), expect.any(Function));
+    expect(paginate).toHaveBeenCalledWith(listReviewComments, expect.not.objectContaining({ review_id: expect.anything() }), expect.any(Function));
+    expect(listReviewComments).toHaveBeenCalledTimes(1);
+    expect(listReviewComments.mock.calls[0][0]).not.toHaveProperty('review_id');
 
     expect(reviews.map(review => review.id)).toEqual([1, 2, 3]);
     const findingA = reviews[0].lineComments;
@@ -542,52 +561,52 @@ describe('GitHubService.getPreviousReviews', () => {
     expect(bodies.filter(body => body === 'finding-a')).toHaveLength(1);
   });
 
-  it('caps comment pages at 20 and still reads every review page', async () => {
+  it('stops loading reviews at the page cap and continues with that partial list', async () => {
     const warn = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
-    listReviews.mockImplementation(async ({ page }: { page: number }) => ({
-      data: [reviewRecord(page)],
-      headers: { link: page < 25 ? '<https://example.test>; rel="next"' : '' },
-    }));
-    listReviewComments.mockImplementation(async ({ page }: { page: number }) => ({
-      data: [commentRecord(page, 1, { line: page, body: `c${page}` })],
-      headers: { link: page < 21 ? '<https://example.test>; rel="next"' : '' },
-    }));
+    paginate.mockImplementation(async (endpoint, _params, mapFn) => {
+      if (!mapFn) throw new Error('paginate map callback is required');
+      if (endpoint !== listReviews) return [];
+      const { loaded, pagesRead } = loadUntilDone(mapFn, page => reviewRecord(page));
+      expect(pagesRead).toBe(HISTORY_PAGE_CAP);
+      return loaded;
+    });
 
     const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
 
-    expect(REVIEW_COMMENT_PAGE_CAP).toBe(20);
-    expect(listReviews).toHaveBeenCalledTimes(25);
-    expect(listReviewComments).toHaveBeenCalledTimes(REVIEW_COMMENT_PAGE_CAP);
-    expect(listReviewComments.mock.calls.map(call => call[0].page)).toEqual(
-      Array.from({ length: REVIEW_COMMENT_PAGE_CAP }, (_, index) => index + 1)
-    );
-    for (const call of listReviewComments.mock.calls) {
-      expect(call[0]).not.toHaveProperty('review_id');
-    }
-    expect(reviews).toHaveLength(25);
-    expect(reviews[0].lineComments.map(comment => comment.id)).toEqual(
-      Array.from({ length: REVIEW_COMMENT_PAGE_CAP }, (_, index) => index + 1)
-    );
+    expect(reviews).toHaveLength(HISTORY_PAGE_CAP);
+    expect(reviews.map(review => review.id)).not.toContain(HISTORY_PAGE_CAP + 1);
+    expect(paginate).toHaveBeenCalledWith(listReviewComments, expect.any(Object), expect.any(Function));
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(
-      `Stopped loading pull request review comments after ${REVIEW_COMMENT_PAGE_CAP} pages`
+      `Stopped loading pull request reviews after ${HISTORY_PAGE_CAP} pages`
     ));
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Deduplicating from the comments that were loaded'));
     warn.mockRestore();
   });
 
-  it('does not warn when the comment list ends on the cap page', async () => {
+  it('stops loading review comments at the page cap and deduplicates from that partial list', async () => {
     const warn = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
-    listReviews.mockResolvedValue({ data: [reviewRecord(1)], headers: {} });
-    listReviewComments.mockImplementation(async ({ page }: { page: number }) => ({
-      data: [commentRecord(page, 1)],
-      headers: { link: page < REVIEW_COMMENT_PAGE_CAP ? '<https://example.test>; rel="next"' : '' },
-    }));
+    paginate.mockImplementation(async (endpoint, params, mapFn) => {
+      if (!mapFn) throw new Error('paginate map callback is required');
+      if (endpoint === listReviews) {
+        return mapFn({ data: [reviewRecord(1)], headers: {} }, () => {});
+      }
+      expect(params).not.toHaveProperty('review_id');
+      const { loaded, pagesRead } = loadUntilDone(
+        mapFn,
+        page => commentRecord(page, 1, { line: page, body: `c${page}` }),
+      );
+      expect(pagesRead).toBe(HISTORY_PAGE_CAP);
+      return loaded;
+    });
 
     const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
 
-    expect(listReviewComments).toHaveBeenCalledTimes(REVIEW_COMMENT_PAGE_CAP);
-    expect(reviews[0].lineComments).toHaveLength(REVIEW_COMMENT_PAGE_CAP);
-    expect(warn).not.toHaveBeenCalled();
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0].lineComments).toHaveLength(HISTORY_PAGE_CAP);
+    expect(reviews[0].lineComments.map(comment => comment.id)).not.toContain(HISTORY_PAGE_CAP + 1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(
+      `Stopped loading pull request review comments after ${HISTORY_PAGE_CAP} pages`
+    ));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Deduplicating from the comments that were loaded'));
     warn.mockRestore();
   });
 

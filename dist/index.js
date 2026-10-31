@@ -2071,57 +2071,47 @@ class GitHubService {
             core.debug('Bot identity is unresolved; skipping previous-review attribution');
             return [];
         }
-        const rawReviews = await this.eachPage(page => this.octokit.pulls.listReviews({
+        const params = {
             owner: this.owner,
             repo: this.repo,
             pull_number: prNumber,
             per_page: reviewHistory_1.HISTORY_PAGE_SIZE,
-            page,
+        };
+        const rawReviews = await this.octokit.paginate(this.octokit.pulls.listReviews, params, capHistoryPages(loaded => {
+            core.warning(`Stopped loading pull request reviews after ${reviewHistory_1.HISTORY_PAGE_CAP} pages of ${reviewHistory_1.HISTORY_PAGE_SIZE} (${loaded} reviews). Continuing with the reviews that were loaded.`);
         }));
         const reviewerId = this.currentReviewerId();
         const ours = rawReviews.filter(review => (0, reviewHistory_1.reviewBelongsToThisAction)(review, identity, reviewerId));
         core.debug(`Found ${ours.length} reviews by this action (${rawReviews.length} total)`);
         if (ours.length === 0)
             return [];
-        const rawComments = await this.eachPage(page => this.octokit.pulls.listReviewComments({
-            owner: this.owner,
-            repo: this.repo,
-            pull_number: prNumber,
-            per_page: reviewHistory_1.HISTORY_PAGE_SIZE,
-            page,
-        }), {
-            cap: reviewHistory_1.REVIEW_COMMENT_PAGE_CAP,
-            onCap: loaded => {
-                core.warning(`Stopped loading pull request review comments after ${reviewHistory_1.REVIEW_COMMENT_PAGE_CAP} pages of ${reviewHistory_1.HISTORY_PAGE_SIZE} (${loaded} comments). Deduplicating from the comments that were loaded.`);
-            },
-        });
+        const rawComments = await this.octokit.paginate(this.octokit.pulls.listReviewComments, params, capHistoryPages(loaded => {
+            core.warning(`Stopped loading pull request review comments after ${reviewHistory_1.HISTORY_PAGE_CAP} pages of ${reviewHistory_1.HISTORY_PAGE_SIZE} (${loaded} comments). Deduplicating from the comments that were loaded.`);
+        }));
         const grouped = (0, reviewHistory_1.groupReviewHistory)(ours, rawComments, identity);
         core.debug(`Grouped ${rawComments.length} review comments onto ${grouped.length} previous reviews`);
         return grouped;
     }
-    /**
-     * Follow `rel="next"` page by page. `cap` stops after that many pages when
-     * another page exists; a list that ends on the cap page is complete.
-     */
-    async eachPage(fetchPage, options) {
-        var _a, _b;
-        const loaded = [];
-        let page = 1;
-        for (;;) {
-            const response = await fetchPage(page);
-            loaded.push(...response.data);
-            const hasNext = linkHeader((_a = response.headers) === null || _a === void 0 ? void 0 : _a.link).includes('rel="next"');
-            if (!hasNext)
-                return loaded;
-            if ((options === null || options === void 0 ? void 0 : options.cap) !== undefined && page >= options.cap) {
-                (_b = options.onCap) === null || _b === void 0 ? void 0 : _b.call(options, loaded.length);
-                return loaded;
-            }
-            page += 1;
-        }
-    }
 }
 exports.GitHubService = GitHubService;
+/**
+ * Map callback for `octokit.paginate`. Calls `done()` after HISTORY_PAGE_CAP
+ * pages when another page exists, and keeps the pages already returned.
+ */
+function capHistoryPages(onCap) {
+    let pages = 0;
+    let loaded = 0;
+    return (response, done) => {
+        pages += 1;
+        const batch = response.data;
+        loaded += batch.length;
+        if (pages >= reviewHistory_1.HISTORY_PAGE_CAP && linkHeader(response.headers.link).includes('rel="next"')) {
+            onCap(loaded);
+            done();
+        }
+        return batch;
+    };
+}
 function linkHeader(value) {
     if (typeof value === 'string')
         return value;
@@ -2773,7 +2763,7 @@ exports.ReviewService = ReviewService;
 /**
  * Previous-review history loaded once over REST and trimmed for the prompt.
  *
- * Comment pages stop at REVIEW_COMMENT_PAGE_CAP. Review pages do not.
+ * Both listings stop after HISTORY_PAGE_CAP pages of HISTORY_PAGE_SIZE.
  * Resolution is unknown until a GraphQL thread query exists, so a null
  * `line` (REST outdated) stands in for "resolved" when ordering the prompt.
  *
@@ -2792,7 +2782,7 @@ exports.ReviewService = ReviewService;
  * finding at the same line still matches.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.EXTERNAL_REPLY_MAX_CHARS = exports.DEFAULT_HISTORY_MAX_BYTES = exports.REVIEW_COMMENT_PAGE_CAP = exports.HISTORY_PAGE_SIZE = void 0;
+exports.EXTERNAL_REPLY_MAX_CHARS = exports.DEFAULT_HISTORY_MAX_BYTES = exports.HISTORY_PAGE_CAP = exports.HISTORY_PAGE_SIZE = void 0;
 exports.userMatchesBot = userMatchesBot;
 exports.reviewBelongsToThisAction = reviewBelongsToThisAction;
 exports.findingDedupKey = findingDedupKey;
@@ -2802,8 +2792,8 @@ exports.fitHistoryToBudget = fitHistoryToBudget;
 const reviewMarker_1 = __nccwpck_require__(761);
 /** Page size for both REST history listings. GitHub's maximum is 100. */
 exports.HISTORY_PAGE_SIZE = 100;
-/** Comment listing stops after this many pages. Review listing does not. */
-exports.REVIEW_COMMENT_PAGE_CAP = 20;
+/** Both history listings stop after this many pages. */
+exports.HISTORY_PAGE_CAP = 20;
 /**
  * Default prompt budget for history. 120000 is 12% of the default
  * MAX_INPUT_BYTES (1000000), inside the 10–15% range from idea 002.

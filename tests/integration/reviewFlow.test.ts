@@ -56,6 +56,10 @@ jest.mock('@octokit/rest', () => ({
         data: []
       }),
     },
+    paginate: jest.fn(async (endpoint, params, mapFn) => {
+      const response = await endpoint(params);
+      return mapFn ? mapFn(response, () => {}) : response.data;
+    }),
     repos: {
       getContent: jest.fn().mockResolvedValue({
         data: {

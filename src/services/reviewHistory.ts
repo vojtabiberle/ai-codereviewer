@@ -1,7 +1,7 @@
 /**
  * Previous-review history loaded once over REST and trimmed for the prompt.
  *
- * Comment pages stop at REVIEW_COMMENT_PAGE_CAP. Review pages do not.
+ * Both listings stop after HISTORY_PAGE_CAP pages of HISTORY_PAGE_SIZE.
  * Resolution is unknown until a GraphQL thread query exists, so a null
  * `line` (REST outdated) stands in for "resolved" when ordering the prompt.
  *
@@ -25,8 +25,8 @@ import { parseReviewMarker, stripReviewMarkers } from './reviewMarker';
 /** Page size for both REST history listings. GitHub's maximum is 100. */
 export const HISTORY_PAGE_SIZE = 100;
 
-/** Comment listing stops after this many pages. Review listing does not. */
-export const REVIEW_COMMENT_PAGE_CAP = 20;
+/** Both history listings stop after this many pages. */
+export const HISTORY_PAGE_CAP = 20;
 
 /**
  * Default prompt budget for history. 120000 is 12% of the default

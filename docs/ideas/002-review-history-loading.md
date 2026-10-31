@@ -5,7 +5,7 @@ Priority: P0 (proposed).
 
 ## Implementation record
 
-One page walk of `pulls.listReviews` (every page) and one page walk of `pulls.listReviewComments` (at most 20 pages of 100, then `core.warning`). Comments are grouped by `pull_request_review_id`. `review_id` is not sent. The comment listing is skipped when this action has no reviews on the pull request.
+`octokit.paginate` loads `pulls.listReviews` and `pulls.listReviewComments` once each. Both stop after 20 pages of 100: the map callback calls `done()`, `core.warning` is logged, and the run continues with the pages that were loaded. Comments are grouped by `pull_request_review_id`. `review_id` is not sent. The comment listing is skipped when this action has no reviews on the pull request.
 
 Reviews match `user.id` when `getBotIdentity()` has a numeric id and the review user has an id; otherwise they match login. A valid marker whose `reviewer` is not this action's reviewer id excludes that review. Unmarked bot reviews stay in history. Markers on human reviews do not attribute those reviews.
 
@@ -19,7 +19,7 @@ Reviews match `user.id` when `getBotIdentity()` has a numeric id and the review 
 4. Summaries of older bot reviews.
 5. Outdated bot findings, newest first, so the oldest are dropped first.
 
-Resolution is unknown until a thread query exists, so "unresolved" means not outdated (`line !== null`). Replies whose author is not this bot are abbreviated to 160 characters in the prompt. The full text stays in memory. Dedup uses every loaded finding, including ones left out of the prompt. Pagination is an explicit page/link loop over those two REST endpoints.
+Resolution is unknown until a thread query exists, so "unresolved" means not outdated (`line !== null`). Replies whose author is not this bot are abbreviated to 160 characters in the prompt. The full text stays in memory. Dedup uses every loaded finding, including ones left out of the prompt. Pagination is `octokit.paginate` on both endpoints, with the same 20-page cap.
 
 ## Problem
 
