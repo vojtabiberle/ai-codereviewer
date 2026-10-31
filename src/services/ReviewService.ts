@@ -6,7 +6,7 @@ import { CommentSeverity, ReviewResponse, UsageReport } from '../providers/AIPro
 import { loadRepoConfig, RepoConfig } from './RepoConfigLoader';
 import { AgenticLimits, DEFAULT_AGENTIC_LIMITS, executeReadFile, makeAgenticEnv } from './AgenticToolRunner';
 import { withRetry } from '../utils/retry';
-import { DEFAULT_HISTORY_MAX_BYTES, findingDedupKey, fitHistoryToBudget, HistoryReview } from './reviewHistory';
+import { findingDedupKey, fitHistoryToBudget, HistoryReview, resolveHistoryBudget } from './reviewHistory';
 import * as core from '@actions/core';
 
 const SEVERITY_ORDER: CommentSeverity[] = ['nit', 'minor', 'major', 'blocker'];
@@ -56,9 +56,16 @@ export class ReviewService {
       ? rawThreshold
       : 80;
 
+    const maxInputBytes = config.maxInputBytes ?? 1_000_000;
+    const historyMaxBytes = resolveHistoryBudget(config.historyMaxBytes, maxInputBytes);
+    if (config.historyMaxBytes !== undefined && config.historyMaxBytes > maxInputBytes) {
+      core.debug(
+        `HISTORY_MAX_BYTES ${config.historyMaxBytes} is above MAX_INPUT_BYTES ${maxInputBytes}; history budget is ${historyMaxBytes}`
+      );
+    }
     this.config = {
-      maxInputBytes: config.maxInputBytes ?? 1_000_000,
-      historyMaxBytes: config.historyMaxBytes ?? DEFAULT_HISTORY_MAX_BYTES,
+      maxInputBytes,
+      historyMaxBytes,
       maxComments: config.maxComments || 0,
       approveReviews: config.approveReviews,
       approveConfidenceThreshold: threshold,
@@ -124,12 +131,7 @@ export class ReviewService {
     const modifiedFiles = await this.diffService.getRelevantFiles(prDetails, lastReviewedCommit);
     core.info(`Modified files length: ${modifiedFiles.length}`);
 
-    const historyBudget = Math.min(this.config.historyMaxBytes, this.config.maxInputBytes);
-    if (this.config.historyMaxBytes > this.config.maxInputBytes) {
-      core.debug(
-        `HISTORY_MAX_BYTES ${this.config.historyMaxBytes} is above MAX_INPUT_BYTES ${this.config.maxInputBytes}; history budget is ${historyBudget}`
-      );
-    }
+    const historyBudget = this.config.historyMaxBytes;
     const historyFit = fitHistoryToBudget(
       loadedHistory,
       new Set(modifiedFiles.map(file => file.path)),

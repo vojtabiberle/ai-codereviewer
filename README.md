@@ -74,7 +74,7 @@ See [agent setup runbook](docs/SETUP-FOR-AGENTS.md).
 | `CONTEXT_FILES` | empty | Comma-separated paths attached from the reviewed head SHA. |
 | `CONFIG_FILE` | `.github/ai-review.yml` | YAML configuration read from the PR base commit. |
 | `MAX_INPUT_BYTES` | `1000000` | UTF-8 cap on initial system prompt plus serialized user payload. Oversized reviews fail before a model call. |
-| `HISTORY_MAX_BYTES` | `120000` | UTF-8 cap for previous-review history inside the user payload (12% of the default `MAX_INPUT_BYTES`). Longer discussions are truncated. Not read from repository YAML. |
+| `HISTORY_MAX_BYTES` | 12% of `MAX_INPUT_BYTES` | UTF-8 cap for previous-review history inside the user payload. Omitted, this is `floor(MAX_INPUT_BYTES * 0.12)`. An explicit value overrides that and is still limited to `MAX_INPUT_BYTES`. Not read from repository YAML. |
 | `AGENTIC_REVIEW` | `false` | Allow the model to call `read_file` and `submit_review`. |
 | `AGENTIC_MAX_FILES` | `20` | Maximum distinct `(path, range)` read attempts, including missing files. |
 | `AGENTIC_MAX_BYTES_PER_FILE` | `20000` | Maximum UTF-8 output bytes per read, including a truncation marker. |
@@ -141,9 +141,11 @@ Reviews and review comments are each loaded once with `octokit.paginate`.
 review. Each listing stops after 20 pages of 100. Hitting that cap logs a
 warning and the run continues with the pages that were loaded.
 
-The model sees at most `HISTORY_MAX_BYTES` of that history (default `120000`;
-the enforced budget is also capped by `MAX_INPUT_BYTES`). Fill order, newest
-first within each tier, skipping an item that does not fit:
+The model sees at most `HISTORY_MAX_BYTES` of that history. When the input is
+omitted the budget is 12% of the configured `MAX_INPUT_BYTES`, rounded down.
+An explicit value replaces that percentage and is still limited to
+`MAX_INPUT_BYTES`. Fill order, newest first within each tier, skipping an item
+that does not fit:
 
 1. Current bot comments on files in this diff, including replies.
 2. Other current bot comments, including replies.
@@ -151,8 +153,9 @@ first within each tier, skipping an item that does not fit:
 4. Summaries of older bot reviews.
 5. Outdated comments (`"line": null`), newest first, so the oldest are dropped first.
 
-Replies from other people are shortened to 160 characters. A null `line` stays
-null and is marked outdated; it is not stored as line 0. Deduplication still
+Replies from people are shortened to 500 characters. Replies from other bots
+are shortened to 160. A null `line` stays null and is marked outdated; it is
+not stored as line 0. Deduplication still
 uses every loaded bot finding, including comments omitted from the prompt, so
 a long discussion does not by itself trip `MAX_INPUT_BYTES`.
 

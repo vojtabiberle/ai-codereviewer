@@ -28,14 +28,14 @@ export const HISTORY_PAGE_SIZE = 100;
 /** Both history listings stop after this many pages. */
 export const HISTORY_PAGE_CAP = 20;
 
-/**
- * Default prompt budget for history. 120000 is 12% of the default
- * MAX_INPUT_BYTES (1000000), inside the 10–15% range from idea 002.
- */
-export const DEFAULT_HISTORY_MAX_BYTES = 120_000;
+/** Share of MAX_INPUT_BYTES used when HISTORY_MAX_BYTES is omitted. */
+export const HISTORY_BUDGET_FRACTION = 0.12;
 
-/** Replies from anyone other than this bot are shortened to this many characters. */
-export const EXTERNAL_REPLY_MAX_CHARS = 160;
+/** Replies from other bots are shortened to this many characters. */
+export const OTHER_BOT_REPLY_MAX_CHARS = 160;
+
+/** Replies from human (non-bot) authors are shortened to this many characters. */
+export const HUMAN_REPLY_MAX_CHARS = 500;
 
 const RECENT_SUMMARY_COUNT = 2;
 
@@ -164,6 +164,11 @@ export function reviewBelongsToThisAction(
   return marker.reviewer === reviewerId;
 }
 
+/**
+ * Outdated is not part of the key. The same finding should still match after
+ * its line goes stale (`line ?? originalLine`), and a null line must not
+ * become 0.
+ */
 export function findingDedupKey(
   path: string,
   line: number | null,
@@ -176,10 +181,26 @@ export function findingDedupKey(
   return `${path} ${linePart} ${normalized}`;
 }
 
-export function abbreviateExternalReply(body: string): string {
+/** When HISTORY_MAX_BYTES is omitted, use 12% of the configured MAX_INPUT_BYTES. */
+export function defaultHistoryMaxBytes(maxInputBytes: number): number {
+  if (!Number.isFinite(maxInputBytes) || maxInputBytes <= 0) return 0;
+  return Math.floor(maxInputBytes * HISTORY_BUDGET_FRACTION);
+}
+
+/**
+ * An explicit HISTORY_MAX_BYTES overrides the 12% default. Either value is
+ * limited to MAX_INPUT_BYTES.
+ */
+export function resolveHistoryBudget(explicit: number | undefined, maxInputBytes: number): number {
+  const chosen = explicit === undefined ? defaultHistoryMaxBytes(maxInputBytes) : explicit;
+  if (!Number.isFinite(chosen)) return 0;
+  return Math.min(Math.max(0, chosen), Math.max(0, maxInputBytes));
+}
+
+export function abbreviateReply(body: string, maxChars: number): string {
   const flat = body.replace(/\s+/g, ' ').trim();
-  if (flat.length <= EXTERNAL_REPLY_MAX_CHARS) return flat;
-  return `${flat.slice(0, EXTERNAL_REPLY_MAX_CHARS - 1)}…`;
+  if (flat.length <= maxChars) return flat;
+  return `${flat.slice(0, maxChars - 1)}…`;
 }
 
 /**
@@ -410,10 +431,16 @@ function renderComment(comment: HistoryComment, replies: readonly HistoryComment
     const ordered = [...replies].sort((a, b) => timestamp(a.createdAt, a.id) - timestamp(b.createdAt, b.id) || a.id - b.id);
     rendered.replies = ordered.map(reply => ({
       author: reply.userLogin,
-      comment: reply.external ? abbreviateExternalReply(reply.body) : reply.body,
+      comment: abbreviateReplyForPrompt(reply),
     }));
   }
   return rendered;
+}
+
+function abbreviateReplyForPrompt(reply: HistoryComment): string {
+  if (!reply.external) return reply.body;
+  const cap = reply.userType?.toLowerCase() === 'bot' ? OTHER_BOT_REPLY_MAX_CHARS : HUMAN_REPLY_MAX_CHARS;
+  return abbreviateReply(reply.body, cap);
 }
 
 function isReply(comment: ListedComment): boolean {

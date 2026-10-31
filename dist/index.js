@@ -99,7 +99,7 @@ async function main() {
         const diffService = new DiffService_1.DiffService(githubToken, excludePatterns);
         const reviewService = new ReviewService_1.ReviewService(aiProvider, githubService, diffService, {
             maxInputBytes: parseNumberInput('MAX_INPUT_BYTES', 1000000, 1, Number.MAX_SAFE_INTEGER, true),
-            historyMaxBytes: parseNumberInput('HISTORY_MAX_BYTES', 120000, 0, Number.MAX_SAFE_INTEGER, true),
+            historyMaxBytes: parseOptionalIntegerInput('HISTORY_MAX_BYTES', 0, Number.MAX_SAFE_INTEGER),
             maxComments,
             approveReviews,
             approveConfidenceThreshold,
@@ -169,6 +169,16 @@ function parsePositiveInt(raw, label) {
         throw new Error(`${label} must be a positive integer; got '${raw}'`);
     }
     return n;
+}
+function parseOptionalIntegerInput(name, min, max) {
+    const raw = core.getInput(name).trim();
+    if (!raw)
+        return undefined;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < min || value > max) {
+        throw new Error(`${name} must be an integer between ${min} and ${max}`);
+    }
+    return value;
 }
 function parseNumberInput(name, fallback, min, max, integer = false) {
     const raw = core.getInput(name).trim();
@@ -2357,7 +2367,7 @@ function severityRank(s) {
 }
 class ReviewService {
     constructor(aiProvider, githubService, diffService, config) {
-        var _a, _b, _c, _d, _e, _f;
+        var _a, _b, _c, _d, _e;
         this.aiProvider = aiProvider;
         this.githubService = githubService;
         this.diffService = diffService;
@@ -2365,24 +2375,29 @@ class ReviewService {
         const threshold = (typeof rawThreshold === 'number' && Number.isFinite(rawThreshold))
             ? rawThreshold
             : 80;
+        const maxInputBytes = (_a = config.maxInputBytes) !== null && _a !== void 0 ? _a : 1000000;
+        const historyMaxBytes = (0, reviewHistory_1.resolveHistoryBudget)(config.historyMaxBytes, maxInputBytes);
+        if (config.historyMaxBytes !== undefined && config.historyMaxBytes > maxInputBytes) {
+            core.debug(`HISTORY_MAX_BYTES ${config.historyMaxBytes} is above MAX_INPUT_BYTES ${maxInputBytes}; history budget is ${historyMaxBytes}`);
+        }
         this.config = {
-            maxInputBytes: (_a = config.maxInputBytes) !== null && _a !== void 0 ? _a : 1000000,
-            historyMaxBytes: (_b = config.historyMaxBytes) !== null && _b !== void 0 ? _b : reviewHistory_1.DEFAULT_HISTORY_MAX_BYTES,
+            maxInputBytes,
+            historyMaxBytes,
             maxComments: config.maxComments || 0,
             approveReviews: config.approveReviews,
             approveConfidenceThreshold: threshold,
             projectContext: config.projectContext,
             projectContextFile: config.projectContextFile,
-            contextFiles: (_c = config.contextFiles) !== null && _c !== void 0 ? _c : [],
+            contextFiles: (_b = config.contextFiles) !== null && _b !== void 0 ? _b : [],
             instructionsFile: config.instructionsFile,
             instructionsUrl: config.instructionsUrl,
             instructionsUrlToken: config.instructionsUrlToken,
             configFile: config.configFile,
-            agenticReview: (_d = config.agenticReview) !== null && _d !== void 0 ? _d : false,
-            agenticLimits: { ...AgenticToolRunner_1.DEFAULT_AGENTIC_LIMITS, ...((_e = config.agenticLimits) !== null && _e !== void 0 ? _e : {}) },
+            agenticReview: (_c = config.agenticReview) !== null && _c !== void 0 ? _c : false,
+            agenticLimits: { ...AgenticToolRunner_1.DEFAULT_AGENTIC_LIMITS, ...((_d = config.agenticLimits) !== null && _d !== void 0 ? _d : {}) },
             providerLabel: config.providerLabel,
             modelLabel: config.modelLabel,
-            minCommentSeverity: (_f = config.minCommentSeverity) !== null && _f !== void 0 ? _f : 'minor',
+            minCommentSeverity: (_e = config.minCommentSeverity) !== null && _e !== void 0 ? _e : 'minor',
         };
     }
     applyRepoConfig(repo) {
@@ -2437,10 +2452,7 @@ class ReviewService {
         core.debug(`Found ${loadedHistory.length} previous reviews`);
         const modifiedFiles = await this.diffService.getRelevantFiles(prDetails, lastReviewedCommit);
         core.info(`Modified files length: ${modifiedFiles.length}`);
-        const historyBudget = Math.min(this.config.historyMaxBytes, this.config.maxInputBytes);
-        if (this.config.historyMaxBytes > this.config.maxInputBytes) {
-            core.debug(`HISTORY_MAX_BYTES ${this.config.historyMaxBytes} is above MAX_INPUT_BYTES ${this.config.maxInputBytes}; history budget is ${historyBudget}`);
-        }
+        const historyBudget = this.config.historyMaxBytes;
         const historyFit = (0, reviewHistory_1.fitHistoryToBudget)(loadedHistory, new Set(modifiedFiles.map(file => file.path)), historyBudget);
         if (historyFit.truncated) {
             core.warning(`Review history truncated to ${historyBudget} bytes; omitted ${historyFit.omittedComments} comment(s) and ${historyFit.omittedSummaries} summary(ies).`);
@@ -2782,11 +2794,13 @@ exports.ReviewService = ReviewService;
  * finding at the same line still matches.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.EXTERNAL_REPLY_MAX_CHARS = exports.DEFAULT_HISTORY_MAX_BYTES = exports.HISTORY_PAGE_CAP = exports.HISTORY_PAGE_SIZE = void 0;
+exports.HUMAN_REPLY_MAX_CHARS = exports.OTHER_BOT_REPLY_MAX_CHARS = exports.HISTORY_BUDGET_FRACTION = exports.HISTORY_PAGE_CAP = exports.HISTORY_PAGE_SIZE = void 0;
 exports.userMatchesBot = userMatchesBot;
 exports.reviewBelongsToThisAction = reviewBelongsToThisAction;
 exports.findingDedupKey = findingDedupKey;
-exports.abbreviateExternalReply = abbreviateExternalReply;
+exports.defaultHistoryMaxBytes = defaultHistoryMaxBytes;
+exports.resolveHistoryBudget = resolveHistoryBudget;
+exports.abbreviateReply = abbreviateReply;
 exports.groupReviewHistory = groupReviewHistory;
 exports.fitHistoryToBudget = fitHistoryToBudget;
 const reviewMarker_1 = __nccwpck_require__(761);
@@ -2794,13 +2808,12 @@ const reviewMarker_1 = __nccwpck_require__(761);
 exports.HISTORY_PAGE_SIZE = 100;
 /** Both history listings stop after this many pages. */
 exports.HISTORY_PAGE_CAP = 20;
-/**
- * Default prompt budget for history. 120000 is 12% of the default
- * MAX_INPUT_BYTES (1000000), inside the 10–15% range from idea 002.
- */
-exports.DEFAULT_HISTORY_MAX_BYTES = 120000;
-/** Replies from anyone other than this bot are shortened to this many characters. */
-exports.EXTERNAL_REPLY_MAX_CHARS = 160;
+/** Share of MAX_INPUT_BYTES used when HISTORY_MAX_BYTES is omitted. */
+exports.HISTORY_BUDGET_FRACTION = 0.12;
+/** Replies from other bots are shortened to this many characters. */
+exports.OTHER_BOT_REPLY_MAX_CHARS = 160;
+/** Replies from human (non-bot) authors are shortened to this many characters. */
+exports.HUMAN_REPLY_MAX_CHARS = 500;
 const RECENT_SUMMARY_COUNT = 2;
 function userMatchesBot(user, identity) {
     var _a;
@@ -2825,17 +2838,38 @@ function reviewBelongsToThisAction(review, identity, reviewerId) {
         return true;
     return marker.reviewer === reviewerId;
 }
+/**
+ * Outdated is not part of the key. The same finding should still match after
+ * its line goes stale (`line ?? originalLine`), and a null line must not
+ * become 0.
+ */
 function findingDedupKey(path, line, originalLine, body) {
     const resolved = line !== null && line !== void 0 ? line : originalLine;
     const linePart = resolved === null ? 'null' : String(resolved);
     const normalized = body.trim().replace(/\s+/g, ' ').toLowerCase();
     return `${path} ${linePart} ${normalized}`;
 }
-function abbreviateExternalReply(body) {
+/** When HISTORY_MAX_BYTES is omitted, use 12% of the configured MAX_INPUT_BYTES. */
+function defaultHistoryMaxBytes(maxInputBytes) {
+    if (!Number.isFinite(maxInputBytes) || maxInputBytes <= 0)
+        return 0;
+    return Math.floor(maxInputBytes * exports.HISTORY_BUDGET_FRACTION);
+}
+/**
+ * An explicit HISTORY_MAX_BYTES overrides the 12% default. Either value is
+ * limited to MAX_INPUT_BYTES.
+ */
+function resolveHistoryBudget(explicit, maxInputBytes) {
+    const chosen = explicit === undefined ? defaultHistoryMaxBytes(maxInputBytes) : explicit;
+    if (!Number.isFinite(chosen))
+        return 0;
+    return Math.min(Math.max(0, chosen), Math.max(0, maxInputBytes));
+}
+function abbreviateReply(body, maxChars) {
     const flat = body.replace(/\s+/g, ' ').trim();
-    if (flat.length <= exports.EXTERNAL_REPLY_MAX_CHARS)
+    if (flat.length <= maxChars)
         return flat;
-    return `${flat.slice(0, exports.EXTERNAL_REPLY_MAX_CHARS - 1)}…`;
+    return `${flat.slice(0, maxChars - 1)}…`;
 }
 /**
  * Group one comment listing onto the reviews that belong to this action.
@@ -3033,10 +3067,17 @@ function renderComment(comment, replies) {
         const ordered = [...replies].sort((a, b) => timestamp(a.createdAt, a.id) - timestamp(b.createdAt, b.id) || a.id - b.id);
         rendered.replies = ordered.map(reply => ({
             author: reply.userLogin,
-            comment: reply.external ? abbreviateExternalReply(reply.body) : reply.body,
+            comment: abbreviateReplyForPrompt(reply),
         }));
     }
     return rendered;
+}
+function abbreviateReplyForPrompt(reply) {
+    var _a;
+    if (!reply.external)
+        return reply.body;
+    const cap = ((_a = reply.userType) === null || _a === void 0 ? void 0 : _a.toLowerCase()) === 'bot' ? exports.OTHER_BOT_REPLY_MAX_CHARS : exports.HUMAN_REPLY_MAX_CHARS;
+    return abbreviateReply(reply.body, cap);
 }
 function isReply(comment) {
     return typeof comment.in_reply_to_id === 'number' && comment.in_reply_to_id > 0;

@@ -636,6 +636,52 @@ agentic_max_turns: 4
     expect(githubService.submitReview).toHaveBeenCalledTimes(1);
   });
 
+  it('defaults the history budget to 12% of MAX_INPUT_BYTES unless an explicit value is set', async () => {
+    const warn = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
+    const huge = historyReview({
+      summary: '',
+      lineComments: [historyComment({ body: 'c'.repeat(30_000) })],
+    });
+
+    const derived = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
+    });
+    (derived.githubService.getPreviousReviews as jest.Mock).mockResolvedValue([huge]);
+    await new ReviewService(derived.aiProvider, derived.githubService, derived.diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      maxInputBytes: 20_000,
+    }).performReview(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Review history truncated to 2400 bytes'));
+
+    warn.mockClear();
+    const explicit = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
+    });
+    (explicit.githubService.getPreviousReviews as jest.Mock).mockResolvedValue([huge]);
+    await new ReviewService(explicit.aiProvider, explicit.githubService, explicit.diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      maxInputBytes: 20_000,
+      historyMaxBytes: 40,
+    }).performReview(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Review history truncated to 40 bytes'));
+
+    warn.mockClear();
+    const clamped = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
+    });
+    (clamped.githubService.getPreviousReviews as jest.Mock).mockResolvedValue([huge]);
+    await new ReviewService(clamped.aiProvider, clamped.githubService, clamped.diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      maxInputBytes: 20_000,
+      historyMaxBytes: 50_000,
+    }).performReview(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Review history truncated to 20000 bytes'));
+    warn.mockRestore();
+  });
+
   it('does not let repository YAML raise the history budget', async () => {
     const { githubService, diffService, aiProvider } = makeServices({
       summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
