@@ -1,6 +1,6 @@
 # Use the exact previously reviewed commit
 
-Status: step 1 (bot identity and the hidden review marker) and step 3 (incremental baseline) are implemented. Valid comment lines from the pull request diff are not. The step 3 decisions are in [001-incremental-baseline-design.md](001-incremental-baseline-design.md).
+Status: step 1 (bot identity and the hidden review marker) and step 3 (incremental baseline) are implemented. Valid comment lines are not. The step 3 decisions are in [001-incremental-baseline-design.md](001-incremental-baseline-design.md). The step 4 design note is [001-comment-lines-design.md](001-comment-lines-design.md).
 Priority: P0 (proposed).
 
 ## Implementation progress

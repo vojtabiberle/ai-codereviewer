@@ -1,6 +1,6 @@
 # Incremental review baseline (idea 001, step 3)
 
-Status: approved and implemented. All seven questions were answered as recommended below. Valid comment lines (step 4) are still not implemented.
+Status: approved and implemented. All seven questions were answered as recommended below. Valid comment lines (step 4) are designed in [001-comment-lines-design.md](001-comment-lines-design.md) and are not implemented.
 
 This note is the step-3 brief checked against the answers already recorded in [001](001-reviewed-commit-sha.md) and [002](002-review-history-loading.md), and against `main` at `ab3d3c6`. Where the brief and those answers disagree, the question says so. Step 4 (comment lines taken from the pull request diff) is not part of this change.
 
