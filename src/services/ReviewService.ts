@@ -1,12 +1,24 @@
 import { buildSystemPrompt, buildUserPayload } from '../prompts';
 import { AIProvider, ReviewRequest } from '../providers/AIProvider';
-import { GitHubService } from '../services/GitHubService';
+import { CompareCommitsResult, GitHubService, PRDetails } from '../services/GitHubService';
 import { DiffService } from '../services/DiffService';
 import { CommentSeverity, ReviewResponse, UsageReport } from '../providers/AIProvider';
 import { loadRepoConfig, RepoConfig } from './RepoConfigLoader';
 import { AgenticLimits, DEFAULT_AGENTIC_LIMITS, executeReadFile, makeAgenticEnv } from './AgenticToolRunner';
 import { withRetry } from '../utils/retry';
-import { findingDedupKey, fitHistoryToBudget, HistoryReview, resolveHistoryBudget } from './reviewHistory';
+import {
+  applyCommitReachability,
+  CommitReachability,
+  findingDedupKey,
+  fitHistoryToBudget,
+  HISTORY_COMPARE_CONCURRENCY,
+  HISTORY_COMPARE_SHA_CAP,
+  HistoryReview,
+  mapWithConcurrency,
+  resolveHistoryBudget,
+  selectBaseline,
+  shasForReachability,
+} from './reviewHistory';
 import * as core from '@actions/core';
 
 const SEVERITY_ORDER: CommentSeverity[] = ['nit', 'minor', 'major', 'blocker'];
@@ -105,7 +117,7 @@ export class ReviewService {
     }
   }
 
-  async performReview(prNumber: number): Promise<ReviewResponse> {
+  async performReview(prNumber: number): Promise<ReviewResponse | null> {
     core.info(`Starting review for PR #${prNumber}`);
 
     // Get PR details
@@ -121,19 +133,32 @@ export class ReviewService {
       this.diffService.setExcludePatterns(repoConfig.exclude_patterns);
     }
 
-    // Baseline selection is still the date heuristic. History loads whenever
-    // this action has reviews, including when that heuristic returns null.
-    const lastReviewedCommit = await this.githubService.getLastReviewedCommit(prNumber);
-    const isUpdate = !!lastReviewedCommit;
+    // History loads whenever this action has reviews. The update prompt is
+    // used only when the compare of a qualifying baseline is `ahead`.
     const loadedHistory = await this.githubService.getPreviousReviews(prNumber);
     core.debug(`Found ${loadedHistory.length} previous reviews`);
 
-    const modifiedFiles = await this.diffService.getRelevantFiles(prDetails, lastReviewedCommit);
+    const decision = await this.decideBaseline(prDetails, loadedHistory);
+    if (decision.kind === 'skip') {
+      core.info('baseline identical to head, skipping review');
+      return null;
+    }
+
+    const modifiedFiles = decision.kind === 'incremental'
+      ? await this.incrementalFiles(prNumber, prDetails, decision.baselineSha)
+      : await this.diffService.getRelevantFiles(prDetails);
+    const history = await this.markUnreachableFindings(
+      loadedHistory,
+      prDetails.head,
+      decision.known,
+      decision.baselineSha,
+    );
+    const isUpdate = decision.kind === 'incremental';
     core.info(`Modified files length: ${modifiedFiles.length}`);
 
     const historyBudget = this.config.historyMaxBytes;
     const historyFit = fitHistoryToBudget(
-      loadedHistory,
+      history,
       new Set(modifiedFiles.map(file => file.path)),
       historyBudget
     );
@@ -244,7 +269,7 @@ export class ReviewService {
     );
 
     const filteredBySeverity = this.filterBySeverity(review.lineComments ?? []);
-    const dedupedComments = this.dedupeAgainstPrevious(filteredBySeverity, loadedHistory);
+    const dedupedComments = this.dedupeAgainstPrevious(filteredBySeverity, history);
     const validatedComments = this.dropInvalidLines(dedupedComments, validLinesByPath);
     const sortedComments = this.sortBySeverityDesc(validatedComments);
     const cappedComments = this.config.maxComments > 0
@@ -268,6 +293,75 @@ export class ReviewService {
     );
 
     return review;
+  }
+
+  private async decideBaseline(
+    prDetails: { base: string; head: string },
+    history: readonly HistoryReview[],
+  ): Promise<
+    | { kind: 'skip' }
+    | { kind: 'full'; baselineSha: string | null; known: Map<string, CommitReachability> }
+    | { kind: 'incremental'; baselineSha: string; known: Map<string, CommitReachability> }
+  > {
+    const { candidate, mismatchedReviewIds } = selectBaseline(history, this.githubService.getReviewerId());
+    for (const id of mismatchedReviewIds) {
+      core.debug(`marker sha differs from commit_id review=${id}`);
+    }
+
+    if (!candidate) {
+      core.info('no previous review, full review');
+      return { kind: 'full', baselineSha: null, known: new Map() };
+    }
+
+    if (candidate.base.toLowerCase() !== prDetails.base.toLowerCase()) {
+      core.info('baseline base changed, full review');
+      return { kind: 'full', baselineSha: candidate.sha, known: new Map() };
+    }
+
+    if (candidate.sha.toLowerCase() === prDetails.head.toLowerCase()) {
+      return { kind: 'skip' };
+    }
+
+    const compared = await this.githubService.compareCommits(candidate.sha, prDetails.head);
+    const known = new Map<string, CommitReachability>([[candidate.sha.toLowerCase(), reachabilityOf(compared)]]);
+    const status = compared.ok ? compared.status.trim().toLowerCase() : '';
+    if (status === 'identical') return { kind: 'skip' };
+    if (status === 'ahead') return { kind: 'incremental', baselineSha: candidate.sha, known };
+
+    core.info(`baseline unreachable, full review: ${unreachableReason(compared)}`);
+    return { kind: 'full', baselineSha: candidate.sha, known };
+  }
+
+  private async incrementalFiles(prNumber: number, prDetails: PRDetails, baselineSha: string) {
+    const [files, paths] = await Promise.all([
+      this.diffService.getRelevantFiles(prDetails, baselineSha),
+      this.githubService.listPullRequestFilePaths(prNumber),
+    ]);
+    const kept = files.filter(file => paths.has(file.path));
+    core.info(`Incremental review kept ${kept.length} of ${files.length} files that are also in the pull request`);
+    return kept;
+  }
+
+  private async markUnreachableFindings(
+    history: readonly HistoryReview[],
+    head: string,
+    known: ReadonlyMap<string, CommitReachability>,
+    baselineSha: string | null,
+  ): Promise<HistoryReview[]> {
+    const ordered = shasForReachability(history, baselineSha);
+    if (ordered.length === 0) return [...history];
+    const selected = ordered.slice(0, HISTORY_COMPARE_SHA_CAP);
+    if (ordered.length > HISTORY_COMPARE_SHA_CAP) {
+      core.warning(`history compare cap, ${HISTORY_COMPARE_SHA_CAP} SHAs`);
+    }
+
+    const reachability = new Map(known);
+    const pending = selected.filter(sha => !reachability.has(sha.toLowerCase()));
+    await mapWithConcurrency(pending, HISTORY_COMPARE_CONCURRENCY, async sha => {
+      const result = await this.githubService.compareCommits(sha, head);
+      reachability.set(sha.toLowerCase(), reachabilityOf(result));
+    });
+    return applyCommitReachability(history, reachability);
   }
 
   private dropInvalidLines(
@@ -505,4 +599,17 @@ export class ReviewService {
 
     return 'COMMENT';
   }
+}
+
+function reachabilityOf(result: CompareCommitsResult): CommitReachability {
+  if (!result.ok) return 'unreachable';
+  const status = result.status.trim().toLowerCase();
+  if (status === 'ahead' || status === 'identical') return status;
+  return 'unreachable';
+}
+
+function unreachableReason(result: CompareCommitsResult): string {
+  if (!result.ok) return `HTTP ${result.statusCode}`;
+  const status = result.status.trim().toLowerCase();
+  return status || 'unknown';
 }

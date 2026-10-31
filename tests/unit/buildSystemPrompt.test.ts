@@ -27,6 +27,7 @@ describe('buildSystemPrompt', () => {
       previousReviews: [{ lineComments: [{ path: 'a.ts', line: null, outdated: true, comment: 'old' }] }],
     });
     expect(prompt).toContain('outdated');
+    expect(prompt).toContain('still a number');
     expect(prompt).toContain('line 0');
     expect(prompt).not.toContain('When reviewing updates');
   });

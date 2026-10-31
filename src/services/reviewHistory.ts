@@ -18,6 +18,10 @@
  * as "null", never coerced to 0), then the normalized body. The outdated
  * flag is stored and rendered; it is not part of the key, so a repeated
  * finding at the same line still matches.
+ *
+ * `outdated` starts as the REST signal (`line === null`). A later compare
+ * can also set it when the finding's commit is not `ahead` or `identical`
+ * against the current head. `line` is left as GitHub returned it.
  */
 
 import { parseReviewMarker, stripReviewMarkers } from './reviewMarker';
@@ -37,6 +41,18 @@ export const OTHER_BOT_REPLY_MAX_CHARS = 160;
 /** Replies from human (non-bot) authors are shortened to this many characters. */
 export const HUMAN_REPLY_MAX_CHARS = 500;
 
+/**
+ * Unique commit SHAs compared when marking findings outdated.
+ * The baseline SHA is first, then newer review SHAs.
+ */
+export const HISTORY_COMPARE_SHA_CAP = 30;
+
+/** In-flight compare calls while classifying finding commits. */
+export const HISTORY_COMPARE_CONCURRENCY = 4;
+
+const QUALIFYING_REVIEW_STATES = new Set(['COMMENTED', 'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
+const BASELINE_SHA = /^[0-9a-f]{40,64}$/i;
+
 const RECENT_SUMMARY_COUNT = 2;
 
 export interface HistoryIdentity {
@@ -54,6 +70,7 @@ export interface ListedReview {
   id: number;
   user?: HistoryUser | null;
   body?: string | null;
+  state?: string | null;
   commit_id?: string | null;
   submitted_at?: string | null;
 }
@@ -91,7 +108,10 @@ export interface HistoryComment {
   createdAt: string | null;
   pullRequestReviewId: number | null;
   body: string;
-  /** True when `line` is null. This is the REST outdated signal. */
+  /**
+   * True when `line` is null, or when this finding's commit does not compare
+   * as `ahead` or `identical` against the current head. `line` is not cleared.
+   */
   outdated: boolean;
   /** True when the author is present and is not this bot. Prompt text is abbreviated. */
   external: boolean;
@@ -104,11 +124,34 @@ export interface HistoryReview {
   commit: string | null;
   summary: string;
   submittedAt: string | null;
+  /** Review state from `pulls.listReviews`, such as `COMMENTED` or `DISMISSED`. */
+  state: string | null;
   /** Reviewer id from a valid marker, or null when the review is unmarked. */
   reviewerId: string | null;
+  /** `sha` from a valid marker, or null when the review is unmarked. */
+  markerSha: string | null;
+  /** `base` from a valid marker, or null when the review is unmarked. */
+  markerBase: string | null;
+  /** `status` from a valid marker, or null when the review is unmarked. */
+  markerStatus: string | null;
   /** Top-level comments by this bot. Replies live on `replies`, not as findings. */
   lineComments: HistoryComment[];
 }
+
+export interface BaselineCandidate {
+  reviewId: number;
+  sha: string;
+  base: string;
+}
+
+export interface BaselineSelection {
+  candidate: BaselineCandidate | null;
+  /** Complete markers whose `sha` does not equal `commit_id`. They do not qualify. */
+  mismatchedReviewIds: number[];
+}
+
+/** `ahead` and `identical` leave the REST outdated flag unchanged. */
+export type CommitReachability = 'ahead' | 'identical' | 'unreachable';
 
 export interface PromptReply {
   author: string | null;
@@ -246,7 +289,11 @@ export function groupReviewHistory(
       commit: review.commit_id ?? null,
       summary: review.body ?? '',
       submittedAt: review.submitted_at ?? null,
+      state: review.state ?? null,
       reviewerId: marker?.reviewer ?? null,
+      markerSha: marker?.sha ?? null,
+      markerBase: marker?.base ?? null,
+      markerStatus: marker?.status ?? null,
       lineComments,
     };
   });
@@ -366,6 +413,112 @@ function compareItems(a: HistoryItem, b: HistoryItem): number {
   return b.id - a.id;
 }
 
+/**
+ * Newest complete review by this reviewer whose marker `sha` equals
+ * `commit_id`. Unmarked reviews, other reviewer ids, `degraded` markers,
+ * `PENDING`, and sha/commit_id mismatches do not qualify. A mismatch is
+ * reported and the walk continues. The caller compares at most the one
+ * returned SHA.
+ */
+export function selectBaseline(
+  reviews: readonly HistoryReview[],
+  reviewerId: string
+): BaselineSelection {
+  const mismatchedReviewIds: number[] = [];
+  for (const review of [...reviews].sort(compareReviewsNewestFirst)) {
+    if (!QUALIFYING_REVIEW_STATES.has((review.state ?? '').toUpperCase())) continue;
+    if (review.reviewerId !== reviewerId) continue;
+    if (review.markerStatus !== 'complete') continue;
+    const sha = review.markerSha ?? '';
+    const commit = review.commit ?? '';
+    if (sha.toLowerCase() !== commit.toLowerCase()) {
+      mismatchedReviewIds.push(review.id);
+      continue;
+    }
+    if (!BASELINE_SHA.test(sha)) continue;
+    return {
+      candidate: {
+        reviewId: review.id,
+        sha,
+        base: review.markerBase ?? '',
+      },
+      mismatchedReviewIds,
+    };
+  }
+  return { candidate: null, mismatchedReviewIds };
+}
+
+/**
+ * SHAs to classify, oldest-dropped-first once the cap is applied by the caller.
+ * Order: the baseline SHA, then each review `commit` newest first, then each
+ * top-level finding's `commitId` (or `originalCommitId` when that is absent).
+ * Reply commits are not included.
+ */
+export function shasForReachability(
+  reviews: readonly HistoryReview[],
+  baselineSha: string | null
+): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const add = (sha: string | null | undefined) => {
+    if (!sha) return;
+    const key = sha.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    ordered.push(sha);
+  };
+
+  add(baselineSha);
+  const newestFirst = [...reviews].sort(compareReviewsNewestFirst);
+  for (const review of newestFirst) add(review.commit);
+  for (const review of newestFirst) {
+    for (const comment of review.lineComments) {
+      add(comment.commitId || comment.originalCommitId);
+    }
+  }
+  return ordered;
+}
+
+/**
+ * Sets `outdated` when a compared SHA is unreachable. An `ahead` or
+ * `identical` result does not clear the REST flag. A SHA missing from the
+ * map (over the compare cap, or absent on the comment) changes nothing.
+ * Reply commits do not mark the parent.
+ */
+export function applyCommitReachability(
+  reviews: readonly HistoryReview[],
+  reachability: ReadonlyMap<string, CommitReachability>
+): HistoryReview[] {
+  return reviews.map(review => ({
+    ...review,
+    lineComments: review.lineComments.map(comment => {
+      const sha = comment.commitId || comment.originalCommitId;
+      if (!sha) return comment;
+      if (reachability.get(sha.toLowerCase()) !== 'unreachable') return comment;
+      if (comment.outdated) return comment;
+      return { ...comment, outdated: true };
+    }),
+  }));
+}
+
+export async function mapWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) return;
+  const workers = Math.max(1, Math.min(concurrency, items.length));
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      await fn(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+}
+
 function compareReviewsNewestFirst(a: HistoryReview, b: HistoryReview): number {
   const byTime = timestamp(b.submittedAt, b.id) - timestamp(a.submittedAt, a.id);
   if (byTime !== 0) return byTime;
@@ -423,9 +576,11 @@ function renderComment(comment: HistoryComment, replies: readonly HistoryComment
     line: comment.line,
     comment: comment.body,
   };
-  if (comment.line === null) {
+  if (comment.outdated) {
     rendered.outdated = true;
-    if (typeof comment.originalLine === 'number') rendered.originalLine = comment.originalLine;
+    if (comment.line === null && typeof comment.originalLine === 'number') {
+      rendered.originalLine = comment.originalLine;
+    }
   }
   if (replies.length > 0) {
     const ordered = [...replies].sort((a, b) => timestamp(a.createdAt, a.id) - timestamp(b.createdAt, b.id) || a.id - b.id);

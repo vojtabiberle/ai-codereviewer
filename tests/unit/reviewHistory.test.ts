@@ -1,6 +1,7 @@
 import { formatReviewMarker } from '../../src/services/reviewMarker';
 import {
   abbreviateReply,
+  applyCommitReachability,
   defaultHistoryMaxBytes,
   findingDedupKey,
   fitHistoryToBudget,
@@ -10,9 +11,12 @@ import {
   HUMAN_REPLY_MAX_CHARS,
   ListedComment,
   ListedReview,
+  mapWithConcurrency,
   OTHER_BOT_REPLY_MAX_CHARS,
   resolveHistoryBudget,
   reviewBelongsToThisAction,
+  selectBaseline,
+  shasForReachability,
   userMatchesBot,
 } from '../../src/services/reviewHistory';
 
@@ -76,7 +80,11 @@ function historyReview(id: number, overrides: Partial<HistoryReview> = {}): Hist
     commit: SHA,
     summary: '',
     submittedAt: `2024-03-0${id}T00:00:00Z`,
+    state: 'COMMENTED',
     reviewerId: 'CI/review',
+    markerSha: SHA,
+    markerBase: BASE,
+    markerStatus: 'complete',
     lineComments: [],
     ...overrides,
   };
@@ -408,5 +416,175 @@ describe('fitHistoryToBudget', () => {
     const json = JSON.stringify(fitHistoryToBudget(reviews, diffPaths, newestOnly).reviews);
     expect(json).toContain('N'.repeat(20));
     expect(json).not.toContain('R'.repeat(20));
+  });
+
+  it('renders outdated when the line is still a number', () => {
+    const reviews = [
+      historyReview(1, {
+        lineComments: [
+          finding({ id: 1, path: 'src/a.ts', body: 'moved', line: 9, originalLine: 4, outdated: true }),
+        ],
+      }),
+    ];
+    const fit = fitHistoryToBudget(reviews, diffPaths, 100_000);
+    expect(fit.reviews[0].lineComments[0]).toEqual({
+      path: 'src/a.ts',
+      line: 9,
+      outdated: true,
+      comment: 'moved',
+    });
+  });
+});
+
+describe('selectBaseline', () => {
+  const reviewer = 'CI/review';
+
+  it('uses the newest complete marker whose sha equals commit_id', () => {
+    const older = 'c'.repeat(40);
+    const newer = 'd'.repeat(40);
+    const selection = selectBaseline([
+      historyReview(1, { submittedAt: '2024-01-01T00:00:00Z', commit: older, markerSha: older }),
+      historyReview(2, { submittedAt: '2024-06-01T00:00:00Z', commit: newer, markerSha: newer }),
+    ], reviewer);
+    expect(selection.candidate).toMatchObject({ reviewId: 2, sha: newer, base: BASE });
+    expect(selection.mismatchedReviewIds).toEqual([]);
+  });
+
+  it('keeps the older complete sha when a newer review is unmarked', () => {
+    const reviewed = 'c'.repeat(40);
+    const later = 'd'.repeat(40);
+    const selection = selectBaseline([
+      historyReview(1, { submittedAt: '2020-01-01T00:00:00Z', commit: reviewed, markerSha: reviewed }),
+      historyReview(2, {
+        submittedAt: '2024-08-01T00:00:00Z',
+        commit: later,
+        state: 'COMMENTED',
+        reviewerId: null,
+        markerSha: null,
+        markerBase: null,
+        markerStatus: null,
+      }),
+    ], reviewer);
+    expect(selection.candidate?.sha).toBe(reviewed);
+  });
+
+  it('skips a newer degraded marker and still accepts DISMISSED', () => {
+    const kept = 'c'.repeat(40);
+    const degraded = 'd'.repeat(40);
+    const selection = selectBaseline([
+      historyReview(2, {
+        submittedAt: '2024-05-01T00:00:00Z',
+        state: 'DISMISSED',
+        commit: kept,
+        markerSha: kept,
+      }),
+      historyReview(3, {
+        submittedAt: '2024-06-01T00:00:00Z',
+        commit: degraded,
+        markerSha: degraded,
+        markerStatus: 'degraded',
+      }),
+    ], reviewer);
+    expect(selection.candidate).toMatchObject({ reviewId: 2, sha: kept });
+  });
+
+  it('rejects another reviewer, a sha mismatch, a short sha, and PENDING', () => {
+    const mismatch = 'c'.repeat(40);
+    const other = 'd'.repeat(40);
+    const pending = 'e'.repeat(40);
+    const selection = selectBaseline([
+      historyReview(1, { reviewerId: 'Other/job', commit: other, markerSha: other }),
+      historyReview(2, { commit: 'f'.repeat(40), markerSha: mismatch }),
+      historyReview(3, { commit: 'abc1234', markerSha: 'abc1234' }),
+      historyReview(4, { state: 'PENDING', commit: pending, markerSha: pending }),
+    ], reviewer);
+    expect(selection.candidate).toBeNull();
+    expect(selection.mismatchedReviewIds).toEqual([2]);
+  });
+
+  it('matches sha and commit_id case-insensitively', () => {
+    const sha = `aAbB${'c'.repeat(36)}`;
+    const selection = selectBaseline([
+      historyReview(1, { commit: sha.toLowerCase(), markerSha: sha }),
+    ], reviewer);
+    expect(selection.candidate?.sha).toBe(sha);
+    expect(selection.mismatchedReviewIds).toEqual([]);
+  });
+});
+
+describe('commit reachability', () => {
+  it('orders the baseline sha, then newer review commits, then finding shas, and skips replies', () => {
+    const baseline = 'b'.repeat(40);
+    const older = '1'.repeat(40);
+    const newer = '2'.repeat(40);
+    const findingSha = '3'.repeat(40);
+    const replySha = '4'.repeat(40);
+    const reviews = [
+      historyReview(1, {
+        submittedAt: '2024-01-01T00:00:00Z',
+        commit: older,
+        lineComments: [
+          finding({
+            id: 1,
+            path: 'src/a.ts',
+            body: 'old',
+            commitId: findingSha,
+            replies: [finding({ id: 9, path: 'src/a.ts', body: 'reply', commitId: replySha })],
+          }),
+        ],
+      }),
+      historyReview(2, { submittedAt: '2024-06-01T00:00:00Z', commit: newer, lineComments: [] }),
+    ];
+    expect(shasForReachability(reviews, baseline)).toEqual([baseline, newer, older, findingSha]);
+  });
+
+  it('marks an unreachable finding outdated without changing its line or dedup key', () => {
+    const sha = 'd'.repeat(40);
+    const comment = finding({
+      id: 1,
+      path: 'src/a.ts',
+      body: 'Keep me',
+      line: 9,
+      originalLine: 4,
+      commitId: sha,
+      outdated: false,
+    });
+    const before = findingDedupKey(comment.path, comment.line, comment.originalLine, comment.body);
+    const [review] = applyCommitReachability(
+      [historyReview(1, { lineComments: [comment] })],
+      new Map([[sha, 'unreachable']]),
+    );
+    const updated = review.lineComments[0];
+    expect(updated).toMatchObject({ line: 9, originalLine: 4, outdated: true, body: 'Keep me' });
+    expect(findingDedupKey(updated.path, updated.line, updated.originalLine, updated.body)).toBe(before);
+  });
+
+  it('does not clear a null line when the commit is ahead, and ignores an uncompared sha', () => {
+    const ahead = 'a'.repeat(40);
+    const skipped = 'e'.repeat(40);
+    const [review] = applyCommitReachability(
+      [historyReview(1, {
+        lineComments: [
+          finding({ id: 1, path: 'src/a.ts', body: 'stale', commitId: ahead, line: null, originalLine: 4, outdated: true }),
+          finding({ id: 2, path: 'src/a.ts', body: 'kept', commitId: skipped, line: 8, outdated: false }),
+          finding({ id: 3, path: 'src/a.ts', body: 'nosha', commitId: null, originalCommitId: null, line: 2, outdated: false }),
+        ],
+      })],
+      new Map([[ahead, 'ahead']]),
+    );
+    expect(review.lineComments.map(comment => comment.outdated)).toEqual([true, false, false]);
+    expect(review.lineComments[0].line).toBeNull();
+  });
+
+  it('runs at most the requested number of compares at once', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    await mapWithConcurrency([1, 2, 3, 4, 5, 6], 4, async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      inFlight -= 1;
+    });
+    expect(maxInFlight).toBe(4);
   });
 });

@@ -104,6 +104,9 @@ describe('Pull Request Review Flow', () => {
     });
 
     const result = await reviewService.performReview(123);
-    expect(result.summary).toMatch('Code review performed by');
+    expect(result?.summary).toMatch('Code review performed by');
+    const results = (Octokit as unknown as jest.Mock).mock.results;
+    const octokit = results[results.length - 1].value;
+    expect(octokit.pulls.listCommits).not.toHaveBeenCalled();
   });
 });
