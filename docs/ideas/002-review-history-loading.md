@@ -1,7 +1,25 @@
 # Load previous review comments once
 
-Status: idea — not approved for implementation.
+Status: implemented for REST history loading. GraphQL thread resolution stays in [004](004-existing-threads.md), [005](005-human-resolution.md) and [006](006-fix-verification.md).
 Priority: P0 (proposed).
+
+## Implementation record
+
+`octokit.paginate` loads `pulls.listReviews` and `pulls.listReviewComments` once each. Both stop after 20 pages of 100: the map callback calls `done()`, `core.warning` is logged, and the run continues with the pages that were loaded. Comments are grouped by `pull_request_review_id`. `review_id` is not sent. The comment listing is skipped when this action has no reviews on the pull request.
+
+Reviews match `user.id` when `getBotIdentity()` has a numeric id and the review user has an id; otherwise they match login. A valid marker whose `reviewer` is not this action's reviewer id excludes that review. Unmarked bot reviews stay in history. Markers on human reviews do not attribute those reviews.
+
+`line: null` stays null and sets `outdated`. The dedup key is `path`, then `line ?? original_line` (`null` is never stored as `0`), then the normalized body. The outdated flag is stored and rendered. It is not part of the key, so a repeated finding at that line still matches.
+
+`HISTORY_MAX_BYTES` is a workflow input. When it is omitted the budget is `floor(MAX_INPUT_BYTES * 0.12)`. An explicit value overrides that percentage and is still limited to `MAX_INPUT_BYTES`. It is not read from repository YAML. The prompt is filled newest-first within each tier, skipping an item that does not fit:
+
+1. Non-outdated bot findings on files in the current diff, with replies.
+2. Other non-outdated bot findings, with replies.
+3. Summaries of the two newest bot reviews, with the hidden marker removed.
+4. Summaries of older bot reviews.
+5. Outdated bot findings, newest first, so the oldest are dropped first.
+
+Resolution is unknown until a thread query exists, so "unresolved" means not outdated (`line !== null`). Human replies are abbreviated to 500 characters in the prompt. Replies from other bots are abbreviated to 160. This bot's own replies stay intact. The full text stays in memory. Dedup uses every loaded finding, including ones left out of the prompt, and the outdated flag is not part of the dedup key. Pagination is `octokit.paginate` on both endpoints, with the same 20-page cap.
 
 ## Problem
 

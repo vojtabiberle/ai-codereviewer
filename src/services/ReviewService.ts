@@ -6,6 +6,7 @@ import { CommentSeverity, ReviewResponse, UsageReport } from '../providers/AIPro
 import { loadRepoConfig, RepoConfig } from './RepoConfigLoader';
 import { AgenticLimits, DEFAULT_AGENTIC_LIMITS, executeReadFile, makeAgenticEnv } from './AgenticToolRunner';
 import { withRetry } from '../utils/retry';
+import { findingDedupKey, fitHistoryToBudget, HistoryReview, resolveHistoryBudget } from './reviewHistory';
 import * as core from '@actions/core';
 
 const SEVERITY_ORDER: CommentSeverity[] = ['nit', 'minor', 'major', 'blocker'];
@@ -18,6 +19,8 @@ function severityRank(s: CommentSeverity | undefined): number {
 
 export interface ReviewServiceConfig {
   maxInputBytes?: number;
+  /** UTF-8 budget for previous-review history inside the user payload. */
+  historyMaxBytes?: number;
   maxComments: number;
   approveReviews: boolean;
   approveConfidenceThreshold?: number;
@@ -36,7 +39,11 @@ export interface ReviewServiceConfig {
 }
 
 export class ReviewService {
-  private config: ReviewServiceConfig & { maxInputBytes: number; agenticLimits: AgenticLimits };
+  private config: ReviewServiceConfig & {
+    maxInputBytes: number;
+    historyMaxBytes: number;
+    agenticLimits: AgenticLimits;
+  };
 
   constructor(
     private aiProvider: AIProvider,
@@ -49,8 +56,16 @@ export class ReviewService {
       ? rawThreshold
       : 80;
 
+    const maxInputBytes = config.maxInputBytes ?? 1_000_000;
+    const historyMaxBytes = resolveHistoryBudget(config.historyMaxBytes, maxInputBytes);
+    if (config.historyMaxBytes !== undefined && config.historyMaxBytes > maxInputBytes) {
+      core.debug(
+        `HISTORY_MAX_BYTES ${config.historyMaxBytes} is above MAX_INPUT_BYTES ${maxInputBytes}; history budget is ${historyMaxBytes}`
+      );
+    }
     this.config = {
-      maxInputBytes: config.maxInputBytes ?? 1_000_000,
+      maxInputBytes,
+      historyMaxBytes,
       maxComments: config.maxComments || 0,
       approveReviews: config.approveReviews,
       approveConfidenceThreshold: threshold,
@@ -106,19 +121,32 @@ export class ReviewService {
       this.diffService.setExcludePatterns(repoConfig.exclude_patterns);
     }
 
-    // Get modified files from diff
+    // Baseline selection is still the date heuristic. History loads whenever
+    // this action has reviews, including when that heuristic returns null.
     const lastReviewedCommit = await this.githubService.getLastReviewedCommit(prNumber);
     const isUpdate = !!lastReviewedCommit;
-
-    // If this is an update, get previous reviews
-    let previousReviews: Awaited<ReturnType<typeof this.githubService.getPreviousReviews>> | undefined;
-    if (isUpdate) {
-      previousReviews = await this.githubService.getPreviousReviews(prNumber);
-      core.debug(`Found ${previousReviews.length} previous reviews`);
-    }
+    const loadedHistory = await this.githubService.getPreviousReviews(prNumber);
+    core.debug(`Found ${loadedHistory.length} previous reviews`);
 
     const modifiedFiles = await this.diffService.getRelevantFiles(prDetails, lastReviewedCommit);
     core.info(`Modified files length: ${modifiedFiles.length}`);
+
+    const historyBudget = this.config.historyMaxBytes;
+    const historyFit = fitHistoryToBudget(
+      loadedHistory,
+      new Set(modifiedFiles.map(file => file.path)),
+      historyBudget
+    );
+    if (historyFit.truncated) {
+      core.warning(
+        `Review history truncated to ${historyBudget} bytes; omitted ${historyFit.omittedComments} comment(s) and ${historyFit.omittedSummaries} summary(ies).`
+      );
+    }
+    const previousReviews = historyFit.reviews.length > 0 ? historyFit.reviews : undefined;
+    if (loadedHistory.length > 0) {
+      const historyBytes = previousReviews ? Buffer.byteLength(JSON.stringify(previousReviews), 'utf8') : 0;
+      core.debug(`Review history prompt is ${historyBytes} bytes (budget ${historyBudget})`);
+    }
 
     // Get full content for each modified file (head version only — the diff
     // already encodes what changed, so fetching the base version too would
@@ -216,7 +244,7 @@ export class ReviewService {
     );
 
     const filteredBySeverity = this.filterBySeverity(review.lineComments ?? []);
-    const dedupedComments = this.dedupeAgainstPrevious(filteredBySeverity, previousReviews);
+    const dedupedComments = this.dedupeAgainstPrevious(filteredBySeverity, loadedHistory);
     const validatedComments = this.dropInvalidLines(dedupedComments, validLinesByPath);
     const sortedComments = this.sortBySeverityDesc(validatedComments);
     const cappedComments = this.config.maxComments > 0
@@ -290,7 +318,7 @@ export class ReviewService {
 
   private dedupeAgainstPrevious(
     newComments: NonNullable<ReviewResponse['lineComments']>,
-    previousReviews?: Array<{ lineComments: Array<{ path: string; line: number; comment: string }> }>
+    previousReviews?: HistoryReview[]
   ): NonNullable<ReviewResponse['lineComments']> {
     if (!previousReviews || previousReviews.length === 0) {
       return newComments;
@@ -299,14 +327,14 @@ export class ReviewService {
     const seen = new Set<string>();
     for (const review of previousReviews) {
       for (const c of review.lineComments) {
-        seen.add(this.commentKey(c.path, c.line, c.comment));
+        seen.add(findingDedupKey(c.path, c.line, c.originalLine, c.body));
       }
     }
 
     const kept: typeof newComments = [];
     let droppedCount = 0;
     for (const c of newComments) {
-      const key = this.commentKey(c.path, c.line, c.comment);
+      const key = findingDedupKey(c.path, c.line, null, c.comment);
       if (seen.has(key)) {
         droppedCount++;
         continue;
@@ -318,10 +346,6 @@ export class ReviewService {
       core.info(`Dropped ${droppedCount} duplicate comment(s) already posted in earlier reviews`);
     }
     return kept;
-  }
-
-  private commentKey(path: string, line: number, body: string): string {
-    return `${path} ${line} ${body.trim().replace(/\s+/g, ' ').toLowerCase()}`;
   }
 
   private async writeUsageSummary(usage: UsageReport): Promise<void> {

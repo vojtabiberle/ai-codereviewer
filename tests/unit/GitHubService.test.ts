@@ -1,5 +1,6 @@
 import { GitHubService } from '../../src/services/GitHubService';
-import { parseReviewMarker } from '../../src/services/reviewMarker';
+import { HISTORY_PAGE_CAP, HISTORY_PAGE_SIZE } from '../../src/services/reviewHistory';
+import { formatReviewMarker, parseReviewMarker } from '../../src/services/reviewMarker';
 
 const createReview = jest.fn().mockResolvedValue({ data: { id: 1 } });
 const getPR = jest.fn();
@@ -10,10 +11,22 @@ const graphql = jest.fn();
 const listReviews = jest.fn();
 const listReviewComments = jest.fn();
 
+async function passThroughPaginate(
+  endpoint: (params: unknown) => Promise<{ data: unknown[] }>,
+  params: unknown,
+  mapFn?: (response: { data: unknown[]; headers?: { link?: string } }, done: () => void) => unknown[],
+) {
+  const response = await endpoint(params);
+  return mapFn ? mapFn(response, () => {}) : response.data;
+}
+
+const paginate = jest.fn(passThroughPaginate);
+
 jest.mock('@octokit/rest', () => ({
   Octokit: jest.fn().mockImplementation(() => ({
     pulls: { createReview, get: getPR, listReviews, listReviewComments },
     users: { getAuthenticated },
+    paginate,
     graphql,
   }))
 }));
@@ -31,6 +44,8 @@ describe('GitHubService.submitReview', () => {
     graphql.mockReset();
     listReviews.mockReset();
     listReviewComments.mockReset();
+    paginate.mockReset();
+    paginate.mockImplementation(passThroughPaginate);
     process.env.GITHUB_REPOSITORY = 'octocat/hello';
     process.env.GITHUB_WORKFLOW = 'CI';
     process.env.GITHUB_JOB = 'review';
@@ -190,6 +205,8 @@ describe('GitHubService bot identity', () => {
     graphql.mockReset();
     listReviews.mockReset();
     listReviewComments.mockReset().mockResolvedValue({ data: [], headers: {} });
+    paginate.mockReset();
+    paginate.mockImplementation(passThroughPaginate);
     process.env.GITHUB_REPOSITORY = 'octocat/hello';
     delete process.env.GITHUB_TOKEN;
   });
@@ -354,22 +371,31 @@ describe('GitHubService bot identity', () => {
     warnSpy.mockRestore();
   });
 
-  it('uses the App bot login, not github-actions[bot], when finding previous reviews', async () => {
+  it('matches previous reviews by bot id and loads comments once without review_id', async () => {
     graphql.mockResolvedValue({ viewer: { login: 'my-app[bot]', databaseId: 12345 } });
     listReviews.mockResolvedValue({
       data: [
-        { id: 1, user: { login: 'human' }, commit_id: '1'.repeat(40), body: 'human' },
-        { id: 2, user: { login: 'github-actions[bot]' }, commit_id: '2'.repeat(40), body: 'other workflow' },
-        { id: 3, user: { login: 'my-app[bot]' }, commit_id: '3'.repeat(40), body: 'ours' },
+        { id: 1, user: { login: 'human', id: 7 }, commit_id: '1'.repeat(40), body: 'human' },
+        { id: 2, user: { login: 'github-actions[bot]', id: 41898282 }, commit_id: '2'.repeat(40), body: 'other workflow' },
+        { id: 3, user: { login: 'my-app[bot]', id: 12345 }, commit_id: '3'.repeat(40), body: 'ours', submitted_at: '2024-01-01T00:00:00Z' },
       ],
       headers: {},
     });
 
-    const reviews = await new GitHubService('ghs_app').getPreviousReviews(9);
+    const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
 
-    expect(reviews).toEqual([{ commit: '3'.repeat(40), summary: 'ours', lineComments: [] }]);
+    expect(reviews.map(review => review.id)).toEqual([3]);
+    expect(reviews[0].commit).toBe('3'.repeat(40));
+    expect(reviews[0].summary).toBe('ours');
     expect(listReviewComments).toHaveBeenCalledTimes(1);
-    expect(listReviewComments.mock.calls[0][0].review_id).toBe(3);
+    expect(listReviewComments.mock.calls[0][0]).not.toHaveProperty('review_id');
+    expect(listReviewComments.mock.calls[0][0]).toMatchObject({
+      owner: 'octocat',
+      repo: 'hello',
+      pull_number: 9,
+      per_page: HISTORY_PAGE_SIZE,
+    });
+    expect(listReviewComments.mock.calls[0][0]).not.toHaveProperty('page');
   });
 
   it('does not attribute github-actions[bot] reviews when identity is unresolved', async () => {
@@ -399,5 +425,261 @@ describe('GitHubService bot identity', () => {
     });
 
     await expect(new GitHubService('ghs_app').getLastReviewSubmittedAt(4)).resolves.toBe('2024-01-01T00:00:00Z');
+  });
+});
+
+const SHA = 'a'.repeat(40);
+const OTHER_SHA = 'b'.repeat(40);
+
+function botUser(overrides: Record<string, unknown> = {}) {
+  return { login: 'my-app[bot]', id: 12345, type: 'Bot', ...overrides };
+}
+
+function reviewRecord(id: number, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    user: botUser(),
+    commit_id: SHA,
+    body: `review ${id}`,
+    submitted_at: `2024-01-${String(Math.min(id, 28)).padStart(2, '0')}T00:00:00Z`,
+    ...overrides,
+  };
+}
+
+function commentRecord(id: number, reviewId: number, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    node_id: `C_${id}`,
+    pull_request_review_id: reviewId,
+    user: botUser(),
+    path: 'src/a.ts',
+    line: id,
+    original_line: id,
+    side: 'RIGHT',
+    commit_id: SHA,
+    original_commit_id: OTHER_SHA,
+    created_at: '2024-01-01T00:00:00Z',
+    body: `comment ${id}`,
+    ...overrides,
+  };
+}
+
+function loadUntilDone(
+  mapFn: (response: { data: unknown[]; headers: { link?: string } }, done: () => void) => unknown[],
+  item: (page: number) => unknown,
+): { loaded: unknown[]; pagesRead: number } {
+  const loaded: unknown[] = [];
+  let pagesRead = 0;
+  for (let page = 1; page <= HISTORY_PAGE_CAP + 5; page++) {
+    let stopped = false;
+    const batch = mapFn({
+      data: [item(page)],
+      headers: { link: '<https://example.test>; rel="next"' },
+    }, () => { stopped = true; });
+    loaded.push(...batch);
+    pagesRead = page;
+    if (stopped) break;
+  }
+  return { loaded, pagesRead };
+}
+
+describe('GitHubService.getPreviousReviews', () => {
+  beforeEach(() => {
+    graphql.mockReset().mockResolvedValue({ viewer: { login: 'my-app[bot]', databaseId: 12345 } });
+    listReviews.mockReset();
+    listReviewComments.mockReset();
+    paginate.mockReset();
+    paginate.mockImplementation(passThroughPaginate);
+    process.env.GITHUB_REPOSITORY = 'octocat/hello';
+    delete process.env.GITHUB_TOKEN;
+  });
+
+  it('groups comments by review id and keeps replies and a null line', async () => {
+    listReviews.mockResolvedValue({
+      data: [reviewRecord(1), reviewRecord(2), reviewRecord(3)],
+      headers: {},
+    });
+    listReviewComments.mockResolvedValue({
+      data: [
+        commentRecord(10, 1, { body: 'finding-a', line: 4, original_line: 4 }),
+        commentRecord(11, 2, { body: 'stale', line: null, original_line: 9 }),
+        commentRecord(13, 1, { body: 'human on our review', user: { login: 'octocat', id: 7, type: 'User' } }),
+        commentRecord(12, 99, { body: 'human finding', user: { login: 'octocat', id: 7, type: 'User' } }),
+        commentRecord(14, 3, { body: 'finding-c' }),
+        commentRecord(15, 50, {
+          body: `human reply ${'x'.repeat(200)}`,
+          in_reply_to_id: 10,
+          user: { login: 'octocat', id: 7, type: 'User' },
+        }),
+        commentRecord(16, 1, { body: 'bot follow-up', in_reply_to_id: 15 }),
+      ],
+      headers: {},
+    });
+
+    const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
+
+    expect(paginate).toHaveBeenCalledWith(listReviews, expect.not.objectContaining({ review_id: expect.anything() }), expect.any(Function));
+    expect(paginate).toHaveBeenCalledWith(listReviewComments, expect.not.objectContaining({ review_id: expect.anything() }), expect.any(Function));
+    expect(listReviewComments).toHaveBeenCalledTimes(1);
+    expect(listReviewComments.mock.calls[0][0]).not.toHaveProperty('review_id');
+
+    expect(reviews.map(review => review.id)).toEqual([1, 2, 3]);
+    const findingA = reviews[0].lineComments;
+    expect(findingA).toHaveLength(1);
+    expect(findingA[0]).toMatchObject({
+      id: 10,
+      nodeId: 'C_10',
+      path: 'src/a.ts',
+      line: 4,
+      originalLine: 4,
+      side: 'RIGHT',
+      commitId: SHA,
+      originalCommitId: OTHER_SHA,
+      body: 'finding-a',
+      outdated: false,
+      pullRequestReviewId: 1,
+    });
+    expect(findingA[0].replies.map(reply => reply.id)).toEqual([15, 16]);
+    expect(findingA[0].replies[0].external).toBe(true);
+    expect(findingA[0].replies[0].inReplyToId).toBe(10);
+    expect(findingA[0].replies[1]).toMatchObject({ external: false, body: 'bot follow-up', inReplyToId: 15 });
+
+    expect(reviews[1].lineComments).toHaveLength(1);
+    expect(reviews[1].lineComments[0]).toMatchObject({
+      id: 11,
+      line: null,
+      originalLine: 9,
+      outdated: true,
+      body: 'stale',
+    });
+    expect(reviews[2].lineComments.map(comment => comment.body)).toEqual(['finding-c']);
+
+    const serialized = JSON.stringify(reviews);
+    expect(serialized).not.toContain('human on our review');
+    expect(serialized).not.toContain('human finding');
+    const bodies = reviews.flatMap(review => review.lineComments.map(comment => comment.body));
+    expect(bodies.filter(body => body === 'finding-a')).toHaveLength(1);
+  });
+
+  it('stops loading reviews at the page cap and continues with that partial list', async () => {
+    const warn = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
+    paginate.mockImplementation(async (endpoint, _params, mapFn) => {
+      if (!mapFn) throw new Error('paginate map callback is required');
+      if (endpoint !== listReviews) return [];
+      const { loaded, pagesRead } = loadUntilDone(mapFn, page => reviewRecord(page));
+      expect(pagesRead).toBe(HISTORY_PAGE_CAP);
+      return loaded;
+    });
+
+    const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
+
+    expect(reviews).toHaveLength(HISTORY_PAGE_CAP);
+    expect(reviews.map(review => review.id)).not.toContain(HISTORY_PAGE_CAP + 1);
+    expect(paginate).toHaveBeenCalledWith(listReviewComments, expect.any(Object), expect.any(Function));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(
+      `Stopped loading pull request reviews after ${HISTORY_PAGE_CAP} pages`
+    ));
+    warn.mockRestore();
+  });
+
+  it('stops loading review comments at the page cap and deduplicates from that partial list', async () => {
+    const warn = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
+    paginate.mockImplementation(async (endpoint, params, mapFn) => {
+      if (!mapFn) throw new Error('paginate map callback is required');
+      if (endpoint === listReviews) {
+        return mapFn({ data: [reviewRecord(1)], headers: {} }, () => {});
+      }
+      expect(params).not.toHaveProperty('review_id');
+      const { loaded, pagesRead } = loadUntilDone(
+        mapFn,
+        page => commentRecord(page, 1, { line: page, body: `c${page}` }),
+      );
+      expect(pagesRead).toBe(HISTORY_PAGE_CAP);
+      return loaded;
+    });
+
+    const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
+
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0].lineComments).toHaveLength(HISTORY_PAGE_CAP);
+    expect(reviews[0].lineComments.map(comment => comment.id)).not.toContain(HISTORY_PAGE_CAP + 1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(
+      `Stopped loading pull request review comments after ${HISTORY_PAGE_CAP} pages`
+    ));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Deduplicating from the comments that were loaded'));
+    warn.mockRestore();
+  });
+
+  it('prefers numeric bot id over login and falls back to login when the review has no id', async () => {
+    listReviews.mockResolvedValue({
+      data: [
+        reviewRecord(1, { user: { login: 'renamed-app[bot]', id: 12345, type: 'Bot' }, body: 'id wins' }),
+        reviewRecord(2, { user: { login: 'my-app[bot]', id: 999, type: 'Bot' }, body: 'same login other id' }),
+        reviewRecord(3, { user: { login: 'my-app[bot]', type: 'Bot' }, body: 'login fallback' }),
+      ],
+      headers: {},
+    });
+    listReviewComments.mockResolvedValue({ data: [], headers: {} });
+
+    const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
+
+    expect(reviews.map(review => review.id)).toEqual([1, 3]);
+    expect(listReviewComments).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches login when the bot identity has no numeric id', async () => {
+    graphql.mockResolvedValue({ viewer: { login: 'my-app[bot]', databaseId: null } });
+    listReviews.mockResolvedValue({
+      data: [
+        reviewRecord(1, { user: { login: 'my-app[bot]', id: 50, type: 'Bot' }, body: 'login match' }),
+        reviewRecord(2, { user: { login: 'other', id: 50, type: 'Bot' }, body: 'other login' }),
+      ],
+      headers: {},
+    });
+    listReviewComments.mockResolvedValue({ data: [], headers: {} });
+
+    const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
+
+    expect(reviews.map(review => review.id)).toEqual([1]);
+  });
+
+  it('keeps unmarked bot reviews, and ignores other workflows and markers on human reviews', async () => {
+    const ours = formatReviewMarker({ reviewer: 'CI/review', sha: SHA, base: OTHER_SHA, status: 'complete' });
+    const other = formatReviewMarker({ reviewer: 'Other/job', sha: SHA, base: OTHER_SHA, status: 'complete' });
+    listReviews.mockResolvedValue({
+      data: [
+        reviewRecord(1, { body: 'legacy unmarked' }),
+        reviewRecord(2, { body: `current\n\n${ours}` }),
+        reviewRecord(3, { body: `other workflow\n\n${other}` }),
+        reviewRecord(4, { user: { login: 'octocat', id: 7, type: 'User' }, body: `forged\n\n${ours}` }),
+      ],
+      headers: {},
+    });
+    listReviewComments.mockResolvedValue({
+      data: [
+        commentRecord(30, 3, { body: 'other workflow finding' }),
+        commentRecord(31, 1, { body: 'legacy finding' }),
+      ],
+      headers: {},
+    });
+
+    const reviews = await new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9);
+
+    expect(reviews.map(review => review.id)).toEqual([1, 2]);
+    expect(reviews[0].reviewerId).toBeNull();
+    expect(reviews[1].reviewerId).toBe('CI/review');
+    expect(reviews.flatMap(review => review.lineComments.map(comment => comment.body))).toEqual(['legacy finding']);
+    expect(listReviewComments).toHaveBeenCalledTimes(1);
+    expect(listReviewComments.mock.calls[0][0]).not.toHaveProperty('review_id');
+  });
+
+  it('does not list comments when this action has no reviews', async () => {
+    listReviews.mockResolvedValue({
+      data: [reviewRecord(1, { user: { login: 'octocat', id: 7, type: 'User' }, body: 'human' })],
+      headers: {},
+    });
+
+    await expect(new GitHubService('ghs_app', { reviewerId: 'CI/review' }).getPreviousReviews(9)).resolves.toEqual([]);
+    expect(listReviewComments).not.toHaveBeenCalled();
   });
 });

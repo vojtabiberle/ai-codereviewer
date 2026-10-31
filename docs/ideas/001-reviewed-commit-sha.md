@@ -21,8 +21,9 @@ below. `status=degraded` is the summary-only publish after a 422 for comment
 locations. `REVIEWER_ID` is an optional action input and is not read from
 repository YAML. A version-tolerant parser ignores unmarked reviews. Baseline
 selection, the compare-status check, and the full-review fallback are not
-implemented. History loading ([002](002-review-history-loading.md)) is unchanged,
-aside from using the resolved login when it looks up this bot.
+implemented. History loading ([002](002-review-history-loading.md)) reads reviews
+and review comments once over REST and matches this bot by numeric id when the
+identity lookup has one.
 
 ## Review marker format
 

@@ -66,6 +66,7 @@ async function main() {
       diffService,
       {
         maxInputBytes: parseNumberInput('MAX_INPUT_BYTES', 1_000_000, 1, Number.MAX_SAFE_INTEGER, true),
+        historyMaxBytes: parseOptionalIntegerInput('HISTORY_MAX_BYTES', 0, Number.MAX_SAFE_INTEGER),
         maxComments,
         approveReviews,
         approveConfidenceThreshold,
@@ -137,6 +138,16 @@ function parsePositiveInt(raw: string, label: string): number | undefined {
     throw new Error(`${label} must be a positive integer; got '${raw}'`);
   }
   return n;
+}
+
+function parseOptionalIntegerInput(name: string, min: number, max: number): number | undefined {
+  const raw = core.getInput(name).trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return value;
 }
 
 function parseNumberInput(name: string, fallback: number, min: number, max: number, integer = false): number {

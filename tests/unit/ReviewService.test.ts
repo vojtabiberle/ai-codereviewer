@@ -2,6 +2,8 @@ import { ReviewService } from '../../src/services/ReviewService';
 import { GitHubService } from '../../src/services/GitHubService';
 import { DiffService } from '../../src/services/DiffService';
 import { AIProvider, ReviewResponse } from '../../src/providers/AIProvider';
+import { HistoryComment, HistoryReview } from '../../src/services/reviewHistory';
+import { buildSystemPrompt } from '../../src/prompts';
 
 class StubAIProvider implements AIProvider {
   public lastRequest: any;
@@ -545,7 +547,201 @@ agentic_max_turns: 4
     expect(submitted).toHaveLength(1);
     expect(submitted[0].severity).toBe('major');
   });
+
+  it('loads history when the baseline heuristic is null and does not switch to the update prompt', async () => {
+    const { githubService, diffService, aiProvider } = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 50, lineComments: [],
+    });
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      historyReview({
+        lineComments: [historyComment({ body: 'earlier finding', line: 2, originalLine: 2 })],
+      }),
+    ]);
+
+    await new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0,
+      approveReviews: false,
+    }).performReview(1);
+
+    expect(githubService.getLastReviewedCommit).toHaveBeenCalled();
+    expect(githubService.getPreviousReviews).toHaveBeenCalledWith(1);
+    const request = (aiProvider as StubAIProvider).lastRequest;
+    expect(request.context.isUpdate).toBe(false);
+    expect(buildSystemPrompt(request)).not.toContain('When reviewing updates');
+    expect(JSON.stringify(request.previousReviews)).toContain('earlier finding');
+  });
+
+  it('dedupes on line ?? originalLine from the full history when the prompt budget drops the comment', async () => {
+    const warn = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
+    const { githubService, diffService, aiProvider } = makeServices({
+      summary: 'sum',
+      suggestedAction: 'COMMENT',
+      confidence: 50,
+      lineComments: [
+        { path: 'src/a.ts', line: 2, comment: 'Same', severity: 'major' },
+        { path: 'src/a.ts', line: 3, comment: 'Same', severity: 'major' },
+        { path: 'src/a.ts', line: 1, comment: 'Fresh', severity: 'major' },
+      ],
+    });
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      historyReview({
+        lineComments: [historyComment({
+          body: 'Same',
+          line: null,
+          originalLine: 2,
+          outdated: true,
+        })],
+      }),
+    ]);
+
+    await new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      historyMaxBytes: 0,
+    }).performReview(1);
+
+    expect((aiProvider as StubAIProvider).lastRequest.previousReviews).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Review history truncated to 0 bytes'));
+    const submitted = (githubService.submitReview as jest.Mock).mock.calls[0][1].lineComments;
+    expect(submitted.map((comment: { line: number; comment: string }) => `${comment.line}:${comment.comment}`)).toEqual([
+      '3:Same',
+      '1:Fresh',
+    ]);
+    warn.mockRestore();
+  });
+
+  it('truncates a discussion that would exceed MAX_INPUT_BYTES and still publishes', async () => {
+    const { githubService, diffService, aiProvider } = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
+    });
+    const huge = 'c'.repeat(80_000);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      historyReview({
+        summary: huge,
+        lineComments: [historyComment({ body: huge })],
+      }),
+    ]);
+
+    await new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      maxInputBytes: 50_000,
+      historyMaxBytes: 1_500,
+    }).performReview(1);
+
+    const previous = (aiProvider as StubAIProvider).lastRequest.previousReviews;
+    const historyBytes = Buffer.byteLength(JSON.stringify(previous ?? []), 'utf8');
+    expect(huge.length).toBeGreaterThan(50_000);
+    expect(historyBytes).toBeLessThanOrEqual(1_500);
+    expect(githubService.submitReview).toHaveBeenCalledTimes(1);
+  });
+
+  it('defaults the history budget to 12% of MAX_INPUT_BYTES unless an explicit value is set', async () => {
+    const warn = jest.spyOn(require('@actions/core'), 'warning').mockImplementation(() => {});
+    const huge = historyReview({
+      summary: '',
+      lineComments: [historyComment({ body: 'c'.repeat(30_000) })],
+    });
+
+    const derived = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
+    });
+    (derived.githubService.getPreviousReviews as jest.Mock).mockResolvedValue([huge]);
+    await new ReviewService(derived.aiProvider, derived.githubService, derived.diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      maxInputBytes: 20_000,
+    }).performReview(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Review history truncated to 2400 bytes'));
+
+    warn.mockClear();
+    const explicit = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
+    });
+    (explicit.githubService.getPreviousReviews as jest.Mock).mockResolvedValue([huge]);
+    await new ReviewService(explicit.aiProvider, explicit.githubService, explicit.diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      maxInputBytes: 20_000,
+      historyMaxBytes: 40,
+    }).performReview(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Review history truncated to 40 bytes'));
+
+    warn.mockClear();
+    const clamped = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
+    });
+    (clamped.githubService.getPreviousReviews as jest.Mock).mockResolvedValue([huge]);
+    await new ReviewService(clamped.aiProvider, clamped.githubService, clamped.diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      maxInputBytes: 20_000,
+      historyMaxBytes: 50_000,
+    }).performReview(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Review history truncated to 20000 bytes'));
+    warn.mockRestore();
+  });
+
+  it('does not let repository YAML raise the history budget', async () => {
+    const { githubService, diffService, aiProvider } = makeServices({
+      summary: 'sum', suggestedAction: 'COMMENT', confidence: 40, lineComments: [],
+    });
+    (githubService.getFileContent as jest.Mock).mockImplementation(async (path: string) =>
+      path === '.github/ai-review.yml' ? 'history_max_bytes: 999999\n' : 'content'
+    );
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([
+      historyReview({
+        summary: '',
+        lineComments: [historyComment({ body: 'y'.repeat(500) })],
+      }),
+    ]);
+
+    await new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0,
+      approveReviews: false,
+      historyMaxBytes: 80,
+      configFile: '.github/ai-review.yml',
+    }).performReview(1);
+
+    expect((aiProvider as StubAIProvider).lastRequest.previousReviews).toBeUndefined();
+  });
 });
+
+function historyComment(overrides: Partial<HistoryComment> = {}): HistoryComment {
+  return {
+    id: 10,
+    nodeId: 'N10',
+    inReplyToId: null,
+    userLogin: 'my-app[bot]',
+    userId: 12345,
+    userType: 'Bot',
+    commitId: 'abc',
+    originalCommitId: 'abc',
+    path: 'src/a.ts',
+    line: 2,
+    originalLine: 2,
+    side: 'RIGHT',
+    createdAt: '2024-01-01T00:00:00Z',
+    pullRequestReviewId: 1,
+    body: 'earlier',
+    outdated: false,
+    external: false,
+    replies: [],
+    ...overrides,
+  };
+}
+
+function historyReview(overrides: Partial<HistoryReview> = {}): HistoryReview {
+  return {
+    id: 1,
+    commit: 'abc',
+    summary: 'previous summary',
+    submittedAt: '2024-01-01T00:00:00Z',
+    reviewerId: null,
+    lineComments: [],
+    ...overrides,
+  };
+}
 
 
 describe('ReviewService trust and input boundaries', () => {

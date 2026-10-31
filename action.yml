@@ -94,6 +94,10 @@ inputs:
   MAX_INPUT_BYTES:
     description: "Maximum UTF-8 size of the initial system prompt and user payload. Oversized reviews fail before calling the model."
     default: "1000000"
+  HISTORY_MAX_BYTES:
+    description: "UTF-8 byte budget for previous-review history inside the user payload. When empty, the budget is 12% of MAX_INPUT_BYTES, rounded down. An explicit value overrides that and is still limited to MAX_INPUT_BYTES. Longer discussions are truncated instead of failing the review. Not read from repository YAML."
+    required: false
+    default: ""
 runs:
   using: "node24"
   main: "dist/index.js"
