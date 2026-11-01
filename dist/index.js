@@ -333,12 +333,13 @@ function buildUserPayload(request) {
 /***/ }),
 
 /***/ 264:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.updateReviewPrompt = exports.baseCodeReviewPrompt = exports.outputFormat = void 0;
+const commentLines_1 = __nccwpck_require__(5712);
 exports.outputFormat = `
 {
   "summary": "",
@@ -373,7 +374,8 @@ Understanding the diff:
         - " " for unchanged CONTEXT lines
         - "-" for REMOVED lines
 - For removed lines, <rightLine> is "-" (a dash). Do NOT post comments on removed lines — they have no right-side line number.
-- Only post comments on ADDED ("+") or CONTEXT (" ") lines, using their "<rightLine>" value.
+- When <rightLine> is "${commentLines_1.NON_COMMENTABLE_LINE_MARKER}", the line is context. You may read it. Never comment on it. "${commentLines_1.NON_COMMENTABLE_LINE_MARKER}" is not a line number and not a diff prefix (+, -, or a space). Do not treat it as a removed line.
+- Only post comments on ADDED ("+") or CONTEXT (" ") lines whose <rightLine> is a number.
 
 ------
 For the "summary" field, use Markdown formatting and follow these guidelines:
@@ -497,7 +499,7 @@ For the "comments" field:
   * category: One of "security", "bug", "performance", "maintainability", "style", "docs", "test", "other"
 - Other rules for "comments" field:
   * ONLY use right-side line numbers that appear before "|" in the diff (the "<rightLine>" value).
-  * DO NOT use line number 0, line numbers not present in the diff, or "-" lines (those are removed lines).
+  * DO NOT use line number 0, line numbers not present in the diff, "-" lines (those are removed lines), or "${commentLines_1.NON_COMMENTABLE_LINE_MARKER}" lines (those may be read and must not be commented on).
   * DO NOT comment on removed lines unless their removal creates a problem:
     ** Focus your review on:
       1. New code (lines with "+")
@@ -1611,6 +1613,7 @@ exports.DiffService = void 0;
 const parse_diff_1 = __importDefault(__nccwpck_require__(2673));
 const minimatch_1 = __nccwpck_require__(6507);
 const core = __importStar(__nccwpck_require__(7484));
+const commentLines_1 = __nccwpck_require__(5712);
 class DiffService {
     constructor(githubToken, excludePatterns) {
         this.githubToken = githubToken;
@@ -1696,33 +1699,15 @@ class DiffService {
     formatDiff(file) {
         return file.chunks
             .map(chunk => {
-            const lines = chunk.changes.map(c => {
-                let lineNum;
-                if (c.type === 'add')
-                    lineNum = String(c.ln);
-                else if (c.type === 'normal')
-                    lineNum = String(c.ln2);
-                else
-                    lineNum = '-';
-                return `${lineNum.padStart(5)}| ${c.content}`;
-            });
+            const lines = chunk.changes
+                .map(change => (0, commentLines_1.formattedDiffLine)(change))
+                .filter((line) => line !== null);
             return `@@ ${chunk.content} @@\n${lines.join('\n')}`;
         })
             .join('\n');
     }
     collectRightLines(file) {
-        const lines = new Set();
-        for (const chunk of file.chunks) {
-            for (const change of chunk.changes) {
-                if (change.type === 'add' && typeof change.ln === 'number') {
-                    lines.add(change.ln);
-                }
-                else if (change.type === 'normal' && typeof change.ln2 === 'number') {
-                    lines.add(change.ln2);
-                }
-            }
-        }
-        return lines;
+        return (0, commentLines_1.rightLinesInFile)(file);
     }
 }
 exports.DiffService = DiffService;
@@ -2022,20 +2007,28 @@ class GitHubService {
             throw error;
         }
     }
-    /** Paths in the pull request diff. Paginated so the 300-file compare cap does not apply. */
-    async listPullRequestFilePaths(prNumber) {
+    /**
+     * Files in the pull request diff, with each file's patch when GitHub
+     * included one. Paginated so the 300-file compare cap does not apply.
+     * `patch` is null for a binary file and when the diff is too large.
+     */
+    async listPullRequestFiles(prNumber) {
         const files = await this.octokit.paginate(this.octokit.pulls.listFiles, {
             owner: this.owner,
             repo: this.repo,
             pull_number: prNumber,
             per_page: 100,
         });
-        const paths = new Set();
+        const listed = [];
         for (const file of files) {
-            if (file.filename)
-                paths.add(file.filename);
+            if (!file.filename)
+                continue;
+            listed.push({
+                path: file.filename,
+                patch: typeof file.patch === 'string' ? file.patch : null,
+            });
         }
-        return paths;
+        return listed;
     }
     /**
      * Reviews by this action, with comments grouped from one pull-request-wide
@@ -2320,6 +2313,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ReviewService = void 0;
 const prompts_1 = __nccwpck_require__(9493);
+const commentLines_1 = __nccwpck_require__(5712);
 const RepoConfigLoader_1 = __nccwpck_require__(4885);
 const AgenticToolRunner_1 = __nccwpck_require__(2215);
 const retry_1 = __nccwpck_require__(1001);
@@ -2519,7 +2513,10 @@ class ReviewService {
         const validLinesByPath = new Map(modifiedFiles.map(f => [f.path, f.validRightLines]));
         const filteredBySeverity = this.filterBySeverity((_f = review.lineComments) !== null && _f !== void 0 ? _f : []);
         const dedupedComments = this.dedupeAgainstPrevious(filteredBySeverity, history);
-        const validatedComments = this.dropInvalidLines(dedupedComments, validLinesByPath);
+        const { kept: validatedComments, droppedBlockers } = this.dropInvalidLines(dedupedComments, validLinesByPath);
+        const note = (0, commentLines_1.unpostedBlockerNote)(droppedBlockers);
+        if (note)
+            review.summary = (0, commentLines_1.insertBeforeAttribution)(review.summary, note);
         const sortedComments = this.sortBySeverityDesc(validatedComments);
         const cappedComments = this.config.maxComments > 0
             ? sortedComments.slice(0, this.config.maxComments)
@@ -2562,11 +2559,21 @@ class ReviewService {
         return { kind: 'full', baselineSha: candidate.sha, known };
     }
     async incrementalFiles(prNumber, prDetails, baselineSha) {
-        const [files, paths] = await Promise.all([
+        const [files, pullRequestFiles] = await Promise.all([
             this.diffService.getRelevantFiles(prDetails, baselineSha),
-            this.githubService.listPullRequestFilePaths(prNumber),
+            this.githubService.listPullRequestFiles(prNumber),
         ]);
-        const kept = files.filter(file => paths.has(file.path));
+        const patchByPath = new Map(pullRequestFiles.map(file => [file.path, file.patch]));
+        const kept = [];
+        for (const file of files) {
+            if (!patchByPath.has(file.path))
+                continue;
+            const pullRequestLines = (0, commentLines_1.rightLinesFromPatch)(patchByPath.get(file.path));
+            if (pullRequestLines === null) {
+                core.info(`comment lines unknown, dropped: ${file.path}`);
+            }
+            kept.push((0, commentLines_1.restrictToPullRequestLines)(file, pullRequestLines));
+        }
         core.info(`Incremental review kept ${kept.length} of ${files.length} files that are also in the pull request`);
         return kept;
     }
@@ -2588,6 +2595,7 @@ class ReviewService {
     }
     dropInvalidLines(comments, validLinesByPath) {
         const kept = [];
+        const droppedBlockers = [];
         let dropped = 0;
         for (const c of comments) {
             const valid = validLinesByPath.get(c.path);
@@ -2597,14 +2605,15 @@ class ReviewService {
             else {
                 dropped++;
                 if (c.severity === 'blocker') {
+                    droppedBlockers.push(c);
                     core.warning(`Blocker comment dropped because line is outside the diff: ${c.path}:${c.line}`);
                 }
             }
         }
         if (dropped > 0) {
-            core.info(`Dropped ${dropped} comment(s) targeting lines outside the PR diff`);
+            core.info(`Dropped ${dropped} comment(s) that are not commentable on the pull request diff`);
         }
-        return kept;
+        return { kept, droppedBlockers };
     }
     filterBySeverity(comments) {
         const min = severityRank(this.config.minCommentSeverity);
@@ -2801,6 +2810,153 @@ function unreachableReason(result) {
         return `HTTP ${result.statusCode}`;
     const status = result.status.trim().toLowerCase();
     return status || 'unknown';
+}
+
+
+/***/ }),
+
+/***/ 5712:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.UNPOSTED_BLOCKER_CAP = exports.NON_COMMENTABLE_LINE_MARKER = void 0;
+exports.rightLinesInFile = rightLinesInFile;
+exports.rightLinesFromPatch = rightLinesFromPatch;
+exports.formattedDiffLine = formattedDiffLine;
+exports.restrictToPullRequestLines = restrictToPullRequestLines;
+exports.unpostedBlockerNote = unpostedBlockerNote;
+exports.insertBeforeAttribution = insertBeforeAttribution;
+const parse_diff_1 = __importDefault(__nccwpck_require__(2673));
+/**
+ * Right-line column for a line that is visible in the fetched diff and is
+ * not a commentable pull-request position. Not a diff prefix (`+`, `-`, or
+ * a space) and not a line number.
+ */
+exports.NON_COMMENTABLE_LINE_MARKER = 'nc';
+exports.UNPOSTED_BLOCKER_CAP = 10;
+const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/;
+const NUMBERED_DIFF_LINE = /^([ ]*)(\d+)(\| )(.*)$/;
+function rightLinesInFile(file) {
+    const lines = new Set();
+    for (const chunk of file.chunks) {
+        for (const change of chunk.changes) {
+            const line = rightLineNumber(change);
+            if (line !== null)
+                lines.add(line);
+        }
+    }
+    return lines;
+}
+/**
+ * Right-side line numbers in a `pulls.listFiles` patch.
+ * `null` means the patch is missing or is not a unified diff.
+ * An empty set means the patch parsed and has no right-side lines.
+ */
+function rightLinesFromPatch(patch) {
+    if (typeof patch !== 'string')
+        return null;
+    const body = patch.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+    if (!body.trim())
+        return null;
+    if (!body.split('\n').some(line => HUNK_HEADER.test(line)))
+        return null;
+    const wrapped = body.startsWith('diff --git ')
+        ? body
+        : `diff --git a/file b/file\n--- a/file\n+++ b/file\n${body.endsWith('\n') ? body : `${body}\n`}`;
+    let parsed;
+    try {
+        parsed = (0, parse_diff_1.default)(wrapped);
+    }
+    catch {
+        return null;
+    }
+    if (parsed.length === 0 || parsed.every(file => file.chunks.length === 0))
+        return null;
+    const lines = new Set();
+    for (const file of parsed) {
+        for (const line of rightLinesInFile(file))
+            lines.add(line);
+    }
+    return lines;
+}
+function formattedDiffLine(change) {
+    if (change.content.startsWith('\\'))
+        return null;
+    if (change.type === 'del')
+        return `${'-'.padStart(5)}| ${change.content}`;
+    const line = rightLineNumber(change);
+    if (line === null)
+        return null;
+    return `${String(line).padStart(5)}| ${change.content}`;
+}
+/**
+ * Keep right-side lines that are also in the pull request diff.
+ * A fetched line outside that diff stays in the text as context, with
+ * `nc` in the right-line column. `null` means the pull request patch
+ * could not be read, so no line of this file is commentable.
+ */
+function restrictToPullRequestLines(file, pullRequestLines) {
+    const allowed = pullRequestLines === null
+        ? new Set()
+        : new Set([...file.validRightLines].filter(line => pullRequestLines.has(line)));
+    return {
+        path: file.path,
+        validRightLines: allowed,
+        diff: markNonCommentableLines(file.diff, allowed),
+    };
+}
+function unpostedBlockerNote(blockers) {
+    if (blockers.length === 0)
+        return null;
+    const lines = blockers.slice(0, exports.UNPOSTED_BLOCKER_CAP).map(blocker => {
+        const text = blocker.comment.replace(/\s+/g, ' ').trim();
+        return `> - **blocker** \`${blocker.path}:${blocker.line}\` — ${text}`;
+    });
+    return [
+        '> Not posted inline (no commentable line on the pull request diff):',
+        ...lines,
+    ].join('\n');
+}
+/** Place `note` after the summary and before the model attribution. */
+function insertBeforeAttribution(summary, note) {
+    const separator = '\n\n------\n\n';
+    const index = summary.lastIndexOf(separator);
+    if (index === -1)
+        return `${summary}\n\n${note}`;
+    return `${summary.slice(0, index)}\n\n${note}${summary.slice(index)}`;
+}
+function rightLineNumber(change) {
+    if (change.content.startsWith('\\'))
+        return null;
+    if (change.type === 'add' && typeof change.ln === 'number')
+        return change.ln;
+    if (change.type === 'normal' && typeof change.ln2 === 'number')
+        return change.ln2;
+    return null;
+}
+function markNonCommentableLines(diff, allowed) {
+    return diff.split('\n').map(line => {
+        const match = NUMBERED_DIFF_LINE.exec(line);
+        if (!match)
+            return line;
+        const lineNo = Number(match[2]);
+        if (allowed.has(lineNo))
+            return line;
+        const width = match[1].length + match[2].length;
+        const marker = exports.NON_COMMENTABLE_LINE_MARKER.padStart(width);
+        return `${marker}${match[3]}${asContext(match[4])}`;
+    }).join('\n');
+}
+/** An added line that cannot be commented on is shown as context, not as a deletion. */
+function asContext(original) {
+    if (original.startsWith('+'))
+        return ` ${original.slice(1)}`;
+    return original;
 }
 
 

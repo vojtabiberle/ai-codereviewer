@@ -469,20 +469,20 @@ describe('GitHubService.compareCommits', () => {
   });
 });
 
-describe('GitHubService.listPullRequestFilePaths', () => {
+describe('GitHubService.listPullRequestFiles', () => {
   beforeEach(() => {
     paginate.mockReset();
     process.env.GITHUB_REPOSITORY = 'octocat/hello';
   });
 
-  it('collects filenames from every page', async () => {
+  it('collects filenames and patches from every page', async () => {
     paginate.mockResolvedValue([
-      { filename: 'src/a.ts' },
+      { filename: 'src/a.ts', patch: '@@ -1 +1 @@\n+a\n' },
       { filename: 'src/b.ts' },
       { filename: '' },
     ]);
 
-    const paths = await new GitHubService('token').listPullRequestFilePaths(9);
+    const files = await new GitHubService('token').listPullRequestFiles(9);
 
     expect(paginate).toHaveBeenCalledWith(listFiles, expect.objectContaining({
       owner: 'octocat',
@@ -490,7 +490,10 @@ describe('GitHubService.listPullRequestFilePaths', () => {
       pull_number: 9,
       per_page: 100,
     }));
-    expect([...paths]).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(files).toEqual([
+      { path: 'src/a.ts', patch: '@@ -1 +1 @@\n+a\n' },
+      { path: 'src/b.ts', patch: null },
+    ]);
   });
 });
 

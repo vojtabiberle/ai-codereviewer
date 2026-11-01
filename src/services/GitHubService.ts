@@ -17,6 +17,12 @@ export type CompareCommitsResult =
   | { ok: true; status: string }
   | { ok: false; statusCode: 404 | 422 };
 
+export interface PullRequestFile {
+  path: string;
+  /** Unified diff for this file. Null when GitHub omitted the patch. */
+  patch: string | null;
+}
+
 export interface PRDetails {
   owner: string;
   repo: string;
@@ -334,19 +340,27 @@ export class GitHubService {
     }
   }
 
-  /** Paths in the pull request diff. Paginated so the 300-file compare cap does not apply. */
-  async listPullRequestFilePaths(prNumber: number): Promise<Set<string>> {
+  /**
+   * Files in the pull request diff, with each file's patch when GitHub
+   * included one. Paginated so the 300-file compare cap does not apply.
+   * `patch` is null for a binary file and when the diff is too large.
+   */
+  async listPullRequestFiles(prNumber: number): Promise<PullRequestFile[]> {
     const files = await this.octokit.paginate(this.octokit.pulls.listFiles, {
       owner: this.owner,
       repo: this.repo,
       pull_number: prNumber,
       per_page: 100,
     });
-    const paths = new Set<string>();
+    const listed: PullRequestFile[] = [];
     for (const file of files) {
-      if (file.filename) paths.add(file.filename);
+      if (!file.filename) continue;
+      listed.push({
+        path: file.filename,
+        patch: typeof file.patch === 'string' ? file.patch : null,
+      });
     }
-    return paths;
+    return listed;
   }
 
   /**

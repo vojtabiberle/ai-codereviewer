@@ -1,3 +1,5 @@
+import { NON_COMMENTABLE_LINE_MARKER } from '../services/commentLines';
+
 export const outputFormat = `
 {
   "summary": "",
@@ -33,7 +35,8 @@ Understanding the diff:
         - " " for unchanged CONTEXT lines
         - "-" for REMOVED lines
 - For removed lines, <rightLine> is "-" (a dash). Do NOT post comments on removed lines — they have no right-side line number.
-- Only post comments on ADDED ("+") or CONTEXT (" ") lines, using their "<rightLine>" value.
+- When <rightLine> is "${NON_COMMENTABLE_LINE_MARKER}", the line is context. You may read it. Never comment on it. "${NON_COMMENTABLE_LINE_MARKER}" is not a line number and not a diff prefix (+, -, or a space). Do not treat it as a removed line.
+- Only post comments on ADDED ("+") or CONTEXT (" ") lines whose <rightLine> is a number.
 
 ------
 For the "summary" field, use Markdown formatting and follow these guidelines:
@@ -157,7 +160,7 @@ For the "comments" field:
   * category: One of "security", "bug", "performance", "maintainability", "style", "docs", "test", "other"
 - Other rules for "comments" field:
   * ONLY use right-side line numbers that appear before "|" in the diff (the "<rightLine>" value).
-  * DO NOT use line number 0, line numbers not present in the diff, or "-" lines (those are removed lines).
+  * DO NOT use line number 0, line numbers not present in the diff, "-" lines (those are removed lines), or "${NON_COMMENTABLE_LINE_MARKER}" lines (those may be read and must not be commented on).
   * DO NOT comment on removed lines unless their removal creates a problem:
     ** Focus your review on:
       1. New code (lines with "+")
