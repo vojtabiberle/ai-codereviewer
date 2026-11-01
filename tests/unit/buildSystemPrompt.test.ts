@@ -1,5 +1,6 @@
 import { buildSystemPrompt } from '../../src/prompts';
 import { ReviewRequest } from '../../src/providers/AIProvider';
+import { NON_COMMENTABLE_LINE_MARKER } from '../../src/services/commentLines';
 
 function makeRequest(overrides: Partial<ReviewRequest['context']> = {}): ReviewRequest {
   return {
@@ -17,6 +18,8 @@ describe('buildSystemPrompt', () => {
   it('returns just the base prompt when nothing else is set', () => {
     const prompt = buildSystemPrompt(makeRequest());
     expect(prompt).toContain('You are an expert code reviewer');
+    expect(prompt).toContain(`When <rightLine> is "${NON_COMMENTABLE_LINE_MARKER}"`);
+    expect(prompt).toContain('You may read it. Never comment on it.');
     expect(prompt).not.toContain('When reviewing updates');
     expect(prompt).not.toContain('Repository-specific reviewer instructions');
   });

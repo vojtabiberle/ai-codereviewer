@@ -1,6 +1,6 @@
 # Use the exact previously reviewed commit
 
-Status: step 1 (bot identity and the hidden review marker) and step 3 (incremental baseline) are implemented. Valid comment lines are not. The step 3 decisions are in [001-incremental-baseline-design.md](001-incremental-baseline-design.md). The step 4 design note is [001-comment-lines-design.md](001-comment-lines-design.md).
+Status: step 1 (bot identity and the hidden review marker), step 3 (incremental baseline), and step 4 (valid comment lines) are implemented. The step 3 decisions are in [001-incremental-baseline-design.md](001-incremental-baseline-design.md). The step 4 decisions are in [001-comment-lines-design.md](001-comment-lines-design.md).
 Priority: P0 (proposed).
 
 ## Implementation progress
@@ -35,7 +35,9 @@ and HTTP 422 log `baseline unreachable, full review` with the reason and review
 `base...head`. A changed `base.sha` is a full review, checked before the
 identical-head skip. A bad compare does not try an older SHA. Findings whose
 commits are not `ahead` or `identical` are marked outdated, at most 30 SHAs,
-4 compares at a time. Valid comment lines still come from the diff that was fetched.
+4 compares at a time. An inline comment is posted only when its line is in the
+diff fetched for that run and in the pull request diff
+([001-comment-lines-design.md](001-comment-lines-design.md)).
 
 ## Review marker format
 

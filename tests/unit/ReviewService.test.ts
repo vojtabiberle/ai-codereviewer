@@ -15,6 +15,13 @@ class StubAIProvider implements AIProvider {
   }
 }
 
+/** Context lines `start` through `start + count - 1` on the right side. */
+function contextPatch(start: number, count: number): string {
+  const lines = [`@@ -${start},${count} +${start},${count} @@`];
+  for (let i = 0; i < count; i++) lines.push(' context');
+  return lines.join('\n');
+}
+
 function makeServices(aiResponse: ReviewResponse) {
   const githubService = {
     getPRDetails: jest.fn().mockResolvedValue({
@@ -23,7 +30,9 @@ function makeServices(aiResponse: ReviewResponse) {
     }),
     getReviewerId: jest.fn().mockReturnValue('CI/review'),
     compareCommits: jest.fn().mockResolvedValue({ ok: true, status: 'ahead' }),
-    listPullRequestFilePaths: jest.fn().mockResolvedValue(new Set(['src/a.ts'])),
+    listPullRequestFiles: jest.fn().mockResolvedValue([
+      { path: 'src/a.ts', patch: contextPatch(1, 9) },
+    ]),
     getPreviousReviews: jest.fn().mockResolvedValue([]),
     getFileContent: jest.fn().mockResolvedValue('content'),
     submitReview: jest.fn().mockResolvedValue(undefined),
@@ -339,8 +348,48 @@ max_comments: 5
     await service.performReview(1);
 
     const submit = githubService.submitReview as jest.Mock;
+    const body = submit.mock.calls[0][1].summary as string;
     expect(submit.mock.calls[0][1].suggestedAction).toBe('COMMENT');
     expect(submit.mock.calls[0][1].lineComments).toHaveLength(0);
+    expect(body).toContain('> Not posted inline (no commentable line on the pull request diff):');
+    expect(body).toContain('> - **blocker** `src/a.ts:999` — blocker on bad line');
+    expect(body.indexOf('blocker on bad line')).toBeLessThan(body.indexOf('------'));
+  });
+
+  it('appends at most 10 dropped blockers and leaves other severities in the log', async () => {
+    const info = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
+    const lineComments = [
+      ...Array.from({ length: 11 }, (_, index) => ({
+        path: 'src/a.ts',
+        line: 100 + index,
+        comment: `drop-${String(index).padStart(2, '0')}`,
+        severity: 'blocker' as const,
+      })),
+      { path: 'src/a.ts', line: 2, comment: 'kept major', severity: 'major' as const },
+      { path: 'src/a.ts', line: 4, comment: 'logged minor', severity: 'minor' as const },
+    ];
+    const { githubService, diffService, aiProvider } = makeServices({
+      summary: 'sum',
+      suggestedAction: 'COMMENT',
+      confidence: 50,
+      lineComments,
+    });
+    const service = new ReviewService(aiProvider, githubService, diffService, {
+      maxComments: 0,
+      approveReviews: true,
+      minCommentSeverity: 'minor',
+    });
+
+    await service.performReview(1);
+
+    const body = (githubService.submitReview as jest.Mock).mock.calls[0][1].summary as string;
+    for (let index = 0; index < 10; index++) {
+      expect(body).toContain(`drop-${String(index).padStart(2, '0')}`);
+    }
+    expect(body).not.toContain('drop-10');
+    expect(body).not.toContain('logged minor');
+    expect(info).toHaveBeenCalledWith('Dropped 12 comment(s) that are not commentable on the pull request diff');
+    info.mockRestore();
   });
 
   it('forces REQUEST_CHANGES when any blocker survives, even if AI said approve', async () => {
@@ -869,7 +918,9 @@ describe('incremental review baseline', () => {
       { path: 'src/a.ts', diff: '@@', validRightLines: new Set([1]) },
       { path: 'upstream.ts', diff: '@@', validRightLines: new Set([4]) },
     ]);
-    (githubService.listPullRequestFilePaths as jest.Mock).mockResolvedValue(new Set(['src/a.ts']));
+    (githubService.listPullRequestFiles as jest.Mock).mockResolvedValue([
+      { path: 'src/a.ts', patch: contextPatch(1, 9) },
+    ]);
 
     await reviewWith(githubService, diffService, aiProvider).performReview(1);
 
@@ -879,6 +930,104 @@ describe('incremental review baseline', () => {
     expect(aiProvider.lastRequest.files.map((file: { path: string }) => file.path)).toEqual(['src/a.ts']);
     expect(aiProvider.lastRequest.context.isUpdate).toBe(true);
     expect(buildSystemPrompt(aiProvider.lastRequest)).toContain('When reviewing updates');
+  });
+
+  it('posts a comment only when the line is in the fetched diff and the pull request patch', async () => {
+    const info = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
+    const diff = [
+      '@@ -10,4 +10,5 @@',
+      `${'10'.padStart(5)}|  context`,
+      `${'11'.padStart(5)}| +only in the incremental hunk`,
+      `${'12'.padStart(5)}|  also context`,
+      `${'-'.padStart(5)}| -removed`,
+    ].join('\n');
+    const { githubService, diffService, aiProvider } = makeServices({
+      summary: 'sum',
+      suggestedAction: 'COMMENT',
+      confidence: 50,
+      lineComments: [
+        { path: 'src/a.ts', line: 10, comment: 'on both', severity: 'major' },
+        { path: 'src/a.ts', line: 11, comment: 'incremental only', severity: 'blocker' },
+        { path: 'src/a.ts', line: 12, comment: 'outside the patch', severity: 'minor' },
+        { path: 'src/a.ts', line: 50, comment: 'pull request only', severity: 'minor' },
+      ],
+    });
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([qualifying()]);
+    (githubService.compareCommits as jest.Mock).mockResolvedValue({ ok: true, status: 'ahead' });
+    (diffService.getRelevantFiles as jest.Mock).mockResolvedValue([
+      { path: 'src/a.ts', diff, validRightLines: new Set([10, 11, 12]) },
+    ]);
+    (githubService.listPullRequestFiles as jest.Mock).mockResolvedValue([
+      {
+        path: 'src/a.ts',
+        patch: '@@ -10,1 +10,1 @@\n context\n@@ -50,1 +50,1 @@\n elsewhere',
+      },
+    ]);
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    const shown = aiProvider.lastRequest.files[0].diff as string;
+    expect(shown).toContain(`${'10'.padStart(5)}|  context`);
+    expect(shown).toContain(`${'nc'.padStart(5)}|  only in the incremental hunk`);
+    expect(shown).toContain(`${'nc'.padStart(5)}|  also context`);
+    expect(shown).toContain(`${'-'.padStart(5)}| -removed`);
+    expect(shown).not.toContain(`${'11'.padStart(5)}|`);
+    expect(shown).not.toContain('-| +only');
+
+    const submitted = (githubService.submitReview as jest.Mock).mock.calls[0][1];
+    expect(submitted.lineComments.map((comment: { line: number }) => comment.line)).toEqual([10]);
+    expect(submitted.suggestedAction).toBe('COMMENT');
+    expect(submitted.summary).toContain('> - **blocker** `src/a.ts:11` — incremental only');
+    expect(submitted.summary).not.toContain('outside the patch');
+    expect(submitted.summary).not.toContain('pull request only');
+    expect(info).toHaveBeenCalledWith('Dropped 3 comment(s) that are not commentable on the pull request diff');
+    expect(diffService.getRelevantFiles).toHaveBeenCalledTimes(1);
+    info.mockRestore();
+  });
+
+  it('drops inline comments when a pull request patch is missing or unparseable', async () => {
+    const info = jest.spyOn(require('@actions/core'), 'info').mockImplementation(() => {});
+    const numbered = (line: number, text: string) => `${String(line).padStart(5)}| ${text}`;
+    const { githubService, diffService, aiProvider } = makeServices({
+      summary: 'sum',
+      suggestedAction: 'COMMENT',
+      confidence: 50,
+      lineComments: [
+        { path: 'src/a.ts', line: 1, comment: 'kept', severity: 'major' },
+        { path: 'src/big.ts', line: 2, comment: 'too big', severity: 'blocker' },
+        { path: 'src/odd.ts', line: 3, comment: 'unparsed', severity: 'major' },
+      ],
+    });
+    pull(githubService);
+    (githubService.getPreviousReviews as jest.Mock).mockResolvedValue([qualifying()]);
+    (githubService.compareCommits as jest.Mock).mockResolvedValue({ ok: true, status: 'ahead' });
+    (diffService.getRelevantFiles as jest.Mock).mockResolvedValue([
+      { path: 'src/a.ts', diff: numbered(1, ' kept'), validRightLines: new Set([1]) },
+      { path: 'src/big.ts', diff: numbered(2, '+too big'), validRightLines: new Set([2]) },
+      { path: 'src/odd.ts', diff: numbered(3, ' odd'), validRightLines: new Set([3]) },
+    ]);
+    (githubService.listPullRequestFiles as jest.Mock).mockResolvedValue([
+      { path: 'src/a.ts', patch: contextPatch(1, 1) },
+      { path: 'src/big.ts', patch: null },
+      { path: 'src/odd.ts', patch: 'not a diff' },
+    ]);
+
+    await reviewWith(githubService, diffService, aiProvider).performReview(1);
+
+    expect(info).toHaveBeenCalledWith('comment lines unknown, dropped: src/big.ts');
+    expect(info).toHaveBeenCalledWith('comment lines unknown, dropped: src/odd.ts');
+    const submitted = (githubService.submitReview as jest.Mock).mock.calls[0][1];
+    expect(submitted.lineComments.map((comment: { path: string }) => comment.path)).toEqual(['src/a.ts']);
+    expect(submitted.summary).toContain('> - **blocker** `src/big.ts:2` — too big');
+    expect(submitted.summary).not.toContain('unparsed');
+    expect(aiProvider.lastRequest.files.map((file: { path: string }) => file.path)).toEqual([
+      'src/a.ts', 'src/big.ts', 'src/odd.ts',
+    ]);
+    expect(aiProvider.lastRequest.files[1].diff).toContain(`${'nc'.padStart(5)}|  too big`);
+    expect(diffService.getRelevantFiles).toHaveBeenCalledTimes(1);
+    expect(githubService.listPullRequestFiles).toHaveBeenCalledTimes(1);
+    info.mockRestore();
   });
 
   it('keeps a dismissed review as the baseline', async () => {
@@ -939,6 +1088,7 @@ describe('incremental review baseline', () => {
     await reviewWith(githubService, diffService, aiProvider).performReview(1);
 
     expect(info).toHaveBeenCalledWith(message);
+    expect(githubService.listPullRequestFiles).not.toHaveBeenCalled();
     expect((githubService.compareCommits as jest.Mock).mock.calls[0][0]).toBe(NEWER);
     expect((diffService.getRelevantFiles as jest.Mock).mock.calls[0][1]).toBeUndefined();
     expect(aiProvider.lastRequest.context.isUpdate).toBe(false);

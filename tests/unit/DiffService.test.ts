@@ -120,6 +120,26 @@ index abc..def 100644
     expect(files[0].diff).toMatch(/^\s+1\|\s+console\.log\("test"\);$/m);
   });
 
+  it('omits a no-newline marker from the formatted diff and from commentable lines', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      text: async () => `diff --git a/src/test.ts b/src/test.ts
+--- a/src/test.ts
++++ b/src/test.ts
+@@ -1 +1 @@
+-old
++new
+\\ No newline at end of file
+`,
+    });
+
+    const files = await new DiffService('mock-github-token', '').getRelevantFiles(mockPRDetails);
+
+    expect(files[0].diff).not.toContain('No newline');
+    expect(files[0].diff).toContain('+new');
+    expect(files[0].validRightLines).toEqual(new Set([1]));
+  });
+
   it('should expose RIGHT-side commentable line numbers including context', async () => {
     const service = new DiffService('mock-github-token', '**/*.md,**/*.json');
     const files = await service.getRelevantFiles(mockPRDetails);

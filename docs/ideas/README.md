@@ -7,7 +7,7 @@ record settled answers; the others still have open questions.
 [001](001-reviewed-commit-sha.md) step 1 (bot identity and the hidden review marker)
 is implemented. [002](002-review-history-loading.md) (one REST load of review
 history, a 20-page cap on reviews and review comments, and `HISTORY_MAX_BYTES`) is implemented.
-Baseline selection in [001](001-reviewed-commit-sha.md) is implemented. The design note is [001-incremental-baseline-design.md](001-incremental-baseline-design.md). Valid comment lines are not implemented. The step 4 design note is [001-comment-lines-design.md](001-comment-lines-design.md).
+Baseline selection in [001](001-reviewed-commit-sha.md) is implemented. The design note is [001-incremental-baseline-design.md](001-incremental-baseline-design.md). Valid comment lines are implemented. The step 4 design note is [001-comment-lines-design.md](001-comment-lines-design.md).
 
 Proposed priorities: P0 correctness prerequisites; P1 comment lifecycle and shared
 foundations; P2 user controls, provider integrations and evaluation; P3 later,
@@ -41,8 +41,8 @@ need-driven extensions. Priority does not automatically authorize implementation
    Done: select the baseline from the previous complete review and compare status,
    with a full-review fallback (001; design in
    [001-incremental-baseline-design.md](001-incremental-baseline-design.md)).
-   Still to do: take valid comment lines from the pull request diff
-   ([001-comment-lines-design.md](001-comment-lines-design.md); design only).
+   Done: comment only on a line that is in the fetched diff and in the pull
+   request diff ([001-comment-lines-design.md](001-comment-lines-design.md)).
 2. Define stable finding identity (003) and publication idempotency (008).
 3. Continue existing threads, respect human resolution and maintain one summary
    (004–005, 007). Fix verification/auto-resolution is a separate opt-in design (006).

@@ -1,6 +1,6 @@
 # Incremental review baseline (idea 001, step 3)
 
-Status: approved and implemented. All seven questions were answered as recommended below. Valid comment lines (step 4) are designed in [001-comment-lines-design.md](001-comment-lines-design.md) and are not implemented.
+Status: approved and implemented. All seven questions were answered as recommended below. Valid comment lines (step 4) are implemented; the decisions are in [001-comment-lines-design.md](001-comment-lines-design.md).
 
 This note is the step-3 brief checked against the answers already recorded in [001](001-reviewed-commit-sha.md) and [002](002-review-history-loading.md), and against `main` at `ab3d3c6`. Where the brief and those answers disagree, the question says so. Step 4 (comment lines taken from the pull request diff) is not part of this change.
 
@@ -28,7 +28,7 @@ These follow the brief and the recorded answers together. The implementation sho
 
 10. **Outdated comments keep their line.** REST `line === null` still sets `outdated`. A comment whose commit is not `ahead` or `identical` against head is also `outdated`, which is the 002 note for force-pushed reviews. `line` stays the number GitHub returned, or null. It is never stored as 0. The dedup key stays `path`, then `line ?? original_line`, then the normalized body. The prompt renders `outdated: true` whenever the flag is set, including when `line` is a number. Today the renderer sets that flag only for a null line ([reviewHistory.ts](../../src/services/reviewHistory.ts#L420-L428)), and the system prompt only mentions the null-line case ([buildSystemPrompt.ts](../../src/prompts/buildSystemPrompt.ts#L18-L21)). Both descriptions gain the compare case. Summaries of those reviews stay in the prompt. The extra flag is on top-level findings, using `commit_id`, then `original_commit_id` when `commit_id` is absent. A missing SHA does not add the flag. Replies do not mark their parent outdated. The identical-head skip does not compare comment SHAs, because no prompt is sent. How many compare calls that takes is question 5.
 
-11. **Step 4 stays out.** `collectRightLines` keeps reading the diff that was fetched. On an incremental run that set is the `{baseline}...{head}` hunks. A comment on a line outside the pull request diff can still get HTTP 422, and the summary-only publish still writes `status=degraded`.
+11. **Step 4 stayed out of this change.** `collectRightLines` kept reading the diff that was fetched. On an incremental run that set was the `{baseline}...{head}` hunks. Step 4 now intersects those lines with the pull request patch; see [001-comment-lines-design.md](001-comment-lines-design.md).
 
 ## Open questions
 

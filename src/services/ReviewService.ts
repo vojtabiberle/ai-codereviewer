@@ -1,6 +1,12 @@
 import { buildSystemPrompt, buildUserPayload } from '../prompts';
 import { AIProvider, ReviewRequest } from '../providers/AIProvider';
 import { CompareCommitsResult, GitHubService, PRDetails } from '../services/GitHubService';
+import {
+  insertBeforeAttribution,
+  restrictToPullRequestLines,
+  rightLinesFromPatch,
+  unpostedBlockerNote,
+} from './commentLines';
 import { DiffService } from '../services/DiffService';
 import { CommentSeverity, ReviewResponse, UsageReport } from '../providers/AIProvider';
 import { loadRepoConfig, RepoConfig } from './RepoConfigLoader';
@@ -270,7 +276,9 @@ export class ReviewService {
 
     const filteredBySeverity = this.filterBySeverity(review.lineComments ?? []);
     const dedupedComments = this.dedupeAgainstPrevious(filteredBySeverity, history);
-    const validatedComments = this.dropInvalidLines(dedupedComments, validLinesByPath);
+    const { kept: validatedComments, droppedBlockers } = this.dropInvalidLines(dedupedComments, validLinesByPath);
+    const note = unpostedBlockerNote(droppedBlockers);
+    if (note) review.summary = insertBeforeAttribution(review.summary, note);
     const sortedComments = this.sortBySeverityDesc(validatedComments);
     const cappedComments = this.config.maxComments > 0
       ? sortedComments.slice(0, this.config.maxComments)
@@ -333,11 +341,20 @@ export class ReviewService {
   }
 
   private async incrementalFiles(prNumber: number, prDetails: PRDetails, baselineSha: string) {
-    const [files, paths] = await Promise.all([
+    const [files, pullRequestFiles] = await Promise.all([
       this.diffService.getRelevantFiles(prDetails, baselineSha),
-      this.githubService.listPullRequestFilePaths(prNumber),
+      this.githubService.listPullRequestFiles(prNumber),
     ]);
-    const kept = files.filter(file => paths.has(file.path));
+    const patchByPath = new Map(pullRequestFiles.map(file => [file.path, file.patch]));
+    const kept = [];
+    for (const file of files) {
+      if (!patchByPath.has(file.path)) continue;
+      const pullRequestLines = rightLinesFromPatch(patchByPath.get(file.path));
+      if (pullRequestLines === null) {
+        core.info(`comment lines unknown, dropped: ${file.path}`);
+      }
+      kept.push(restrictToPullRequestLines(file, pullRequestLines));
+    }
     core.info(`Incremental review kept ${kept.length} of ${files.length} files that are also in the pull request`);
     return kept;
   }
@@ -367,8 +384,9 @@ export class ReviewService {
   private dropInvalidLines(
     comments: NonNullable<ReviewResponse['lineComments']>,
     validLinesByPath: Map<string, Set<number>>
-  ): NonNullable<ReviewResponse['lineComments']> {
+  ): { kept: NonNullable<ReviewResponse['lineComments']>; droppedBlockers: NonNullable<ReviewResponse['lineComments']> } {
     const kept: typeof comments = [];
+    const droppedBlockers: typeof comments = [];
     let dropped = 0;
     for (const c of comments) {
       const valid = validLinesByPath.get(c.path);
@@ -377,6 +395,7 @@ export class ReviewService {
       } else {
         dropped++;
         if (c.severity === 'blocker') {
+          droppedBlockers.push(c);
           core.warning(
             `Blocker comment dropped because line is outside the diff: ${c.path}:${c.line}`
           );
@@ -384,9 +403,9 @@ export class ReviewService {
       }
     }
     if (dropped > 0) {
-      core.info(`Dropped ${dropped} comment(s) targeting lines outside the PR diff`);
+      core.info(`Dropped ${dropped} comment(s) that are not commentable on the pull request diff`);
     }
-    return kept;
+    return { kept, droppedBlockers };
   }
 
   private filterBySeverity(

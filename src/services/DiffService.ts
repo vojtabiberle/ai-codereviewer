@@ -1,6 +1,7 @@
 import parseDiff, { File } from 'parse-diff';
 import { minimatch } from 'minimatch';
 import * as core from '@actions/core';
+import { formattedDiffLine, rightLinesInFile } from './commentLines';
 import { PRDetails } from './GitHubService';
 
 export interface RelevantFile {
@@ -119,29 +120,15 @@ export class DiffService {
   private formatDiff(file: File): string {
     return file.chunks
       .map(chunk => {
-        const lines = chunk.changes.map(c => {
-          let lineNum: string;
-          if (c.type === 'add') lineNum = String(c.ln);
-          else if (c.type === 'normal') lineNum = String(c.ln2);
-          else lineNum = '-';
-          return `${lineNum.padStart(5)}| ${c.content}`;
-        });
+        const lines = chunk.changes
+          .map(change => formattedDiffLine(change))
+          .filter((line): line is string => line !== null);
         return `@@ ${chunk.content} @@\n${lines.join('\n')}`;
       })
       .join('\n');
   }
 
   private collectRightLines(file: File): Set<number> {
-    const lines = new Set<number>();
-    for (const chunk of file.chunks) {
-      for (const change of chunk.changes) {
-        if (change.type === 'add' && typeof change.ln === 'number') {
-          lines.add(change.ln);
-        } else if (change.type === 'normal' && typeof change.ln2 === 'number') {
-          lines.add(change.ln2);
-        }
-      }
-    }
-    return lines;
+    return rightLinesInFile(file);
   }
 }
